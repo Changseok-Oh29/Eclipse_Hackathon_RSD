@@ -31,7 +31,7 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=2000)
     ap.add_argument('--fps',  type=int, default=20)
-    ap.add_argument('--spawn_idx', type=int, default=328)
+    ap.add_argument('--spawn_idx', type=int, default=20)
     ap.add_argument('--width', type=int, default=960)
     ap.add_argument('--height', type=int, default=580)
     ap.add_argument('--fov', type=float, default=90.0)
