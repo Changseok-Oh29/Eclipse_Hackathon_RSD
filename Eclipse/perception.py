@@ -547,6 +547,7 @@ def main():
             thr = float(last_ctrl.get("throttle", 0.0))
             brk = float(last_ctrl.get("brake", 0.0))
             st  = float(last_ctrl.get("steer", 0.0))
+            mode_str = str(last_ctrl.get("mode", "-"))
 
             # 조향에 따라 레이더 허용 각 확장
             max_az_deg = float(np.clip(BASE_MAX_AZIMUTH_DEG + 6.0 * abs(st),
@@ -640,6 +641,11 @@ def main():
             hud_txt = f"v={v_kmh:5.1f} km/h  thr={thr:.2f} brk={brk:.2f} str={st:+.2f}"
             cv2.putText(vis, hud_txt, (10, 28),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2, cv2.LINE_AA)
+            # Mode 표시
+            mode_label = f"MODE: {mode_str}"
+            (text_w, text_h), _ = cv2.getTextSize(mode_label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            cv2.putText(vis, mode_label, (w - text_w - 10, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (50,255,50), 2, cv2.LINE_AA)
             ttc_disp = ttc if (np.isfinite(ttc) and has_target_confirmed) else -1.0
             lead_speed_disp = -1.0
             if lead:

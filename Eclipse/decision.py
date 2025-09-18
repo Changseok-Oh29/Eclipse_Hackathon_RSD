@@ -25,16 +25,16 @@ MAX_DECEL                    = 5.0
 THR_GAIN                     = 0.40
 BRK_GAIN                     = 0.35
 
-AEB_ENTER_TTC                = 3.0
-AEB_EXIT_TTC                 = 4.5
-FOLLOW_ENTER_TTC             = 8.0     # ★ 진입 임계
-FOLLOW_EXIT_TTC              = 10.0    # ★ 이탈 임계(히스테리시스)
+AEB_ENTER_TTC                = 2.5
+AEB_EXIT_TTC                 = 4.0
+FOLLOW_ENTER_TTC             = 7.0     # ★ 진입 임계
+FOLLOW_EXIT_TTC              = 9.0    # ★ 이탈 임계(히스테리시스)
 AEB_ACTIVATION_SPEED_THRESHOLD = 2.8
 AEB_MIN_HOLD_SEC             = 0.8
 MODE_COOLDOWN_SEC            = 0.4
 
 MIN_CONFIRM_FRAMES           = 2
-FOLLOW_MAX_DIST_M            = 80.0
+FOLLOW_MAX_DIST_M            = 70.0
 
 # 레이트 리미터(20Hz)
 THR_RATE_UP                  = 0.08
@@ -86,7 +86,7 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=2000)
     ap.add_argument('--role', default='ego')
-    ap.add_argument('--deadband', type=int, default=4)
+    ap.add_argument('--deadband', type=int, default=8)
     ap.add_argument('--apply_hz', type=float, default=20.0)
     args = ap.parse_args()
 
@@ -298,7 +298,7 @@ def main():
                       f"tgt_ready={int(target_ready)}  dist={(distance if np.isfinite(distance) else -1):5.1f}  "
                       f"rel={float(acc_rel_v):+4.1f}  ttc={(ttc if np.isfinite(ttc) else -1):4.1f}  "
                       f"thr={throttle_cmd:.2f}  brk={brake_cmd:.2f}  steer={steer:+.3f}")
-                log_next = now + 1.0
+                log_next = now + 0.1
 
     finally:
         try: sub_lk.undeclare()

@@ -1,0 +1,20 @@
+{
+  mode: "router",
+
+  listen: {
+    endpoints: { router: ["tcp/[::]:7447"] }
+  },
+
+  transport: {
+    shared_memory: {
+      enabled: true,
+      transport_optimization: {
+        message_size_threshold: 65536,   // 64KB 넘으면 SHM 우선
+        pool_size: 1073741824            // 1 GiB (필요시 2147483648 = 2 GiB)
+      }
+    }
+  },
+
+  plugins_loading: { enabled: true },
+  plugins: {}
+}
