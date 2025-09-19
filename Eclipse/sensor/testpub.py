@@ -18,10 +18,6 @@ SENSOR_TICK  = float(os.environ.get("SENSOR_TICK", "0.05"))  # 20Hz (=0.05s). 15
 # ===== zenoh =====
 cfg = zenoh.Config()
 
-sess = zenoh.open(cfg)
-pub  = sess.declare_publisher('carla/cam/front')
-
-
 #sess = zenoh.open(cfg) 최후에 주석 해제
 #pub  = sess.declare_publisher('carla/cam/front')
 try:
