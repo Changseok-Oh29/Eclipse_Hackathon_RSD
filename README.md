@@ -44,6 +44,11 @@ push하실 때 어떤 부분 수정하셨는지 description 자세하게 설명 
         ghcr.io/eclipse-kuksa/kuksa-databroker:latest \
         --insecure --vss /data/model.json
 ## perception.py 실행
+항상 먼저 실행
+    
     python3 perception.py
 ## decision.py 실행
+perception 실행 후 약 2-3초 기다렸다가 실행 
+    
     python3 decision.py
+    

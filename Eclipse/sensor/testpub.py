@@ -17,6 +17,20 @@ SENSOR_TICK  = float(os.environ.get("SENSOR_TICK", "0.05"))  # 20Hz (=0.05s). 15
 
 # ===== zenoh =====
 cfg = zenoh.Config()
+
+sess = zenoh.open(cfg)
+pub  = sess.declare_publisher('carla/cam/front')
+
+
+#sess = zenoh.open(cfg) 최후에 주석 해제
+#pub  = sess.declare_publisher('carla/cam/front')
+try:
+    cfg.insert_json5('mode', '"client"')
+    cfg.insert_json5('connect/endpoints', '["tcp/127.0.0.1:7447"]')
+except AttributeError:
+    cfg.insert_json('mode', '"client"')
+    cfg.insert_json('connect/endpoints', '["tcp/127.0.0.1:7447"]')
+
 sess = zenoh.open(cfg)
 pub  = sess.declare_publisher('carla/cam/front')
 
