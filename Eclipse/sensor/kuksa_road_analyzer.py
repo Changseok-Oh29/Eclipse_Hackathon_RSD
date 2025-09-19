@@ -1,25 +1,40 @@
 # -*- coding: utf-8 -*-
 # kuksa_road_analyzer.py
-# - zenoh로 들어오는 RAW 프레임(attachment에 w,h,c,stride 포함)을 '무복사 뷰'로 분석
-# - 결과를 Kuksa Databroker(VSS)에 set_current_values로 게시
-# - 필요 시 기존 zenoh JSON도 함께 발행 가능(OUT_ZENOH=1)
+#
+# 기능 요약
+# - Zenoh로 받은 CARLA 카메라 프레임을 가볍게 분석(ROI 기반 SRI/LV/ED 등)
+# - 결과를 매 프레임 Kuksa VSS에 반드시 게시 (모델이 느려도 직전 결과 재사용)
+# - Road.Ts는 심시간(sim time)만 사용하며 Δt 격자(CAM_DT)로 스냅(quantize)
+# - 로그는 한 줄에 여러 [STATE] 블록이 이어지며, LINE_WRAP개마다 줄바꿈
+#
+# 실행 예:
+#   CAM_DT=0.05 FRAME_INTERVAL=1 LINE_WRAP=8 python kuksa_road_analyzer.py
 
-import os, time, json, traceback
+import os, sys, json, time, traceback
 import numpy as np
 import cv2
 import zenoh
 from kuksa_client.grpc import VSSClient, Datapoint
 
-# ========= 설정 =========
-IN_KEY   = os.environ.get("IN_KEY", "carla/cam/front")  # RAW 프레임 토픽
-OUT_ZENOH = os.environ.get("OUT_ZENOH", "0") == "1"     # 제노 JSON 동시 발행 여부 (기본 꺼짐)
+# ================== 환경변수 설정 ==================
+IN_KEY        = os.environ.get("IN_KEY", "carla/cam/front")  # Zenoh 입력 토픽
+KUKSA_HOST    = os.environ.get("KUKSA_HOST", "127.0.0.1")
+KUKSA_PORT    = int(os.environ.get("KUKSA_PORT", "55555"))
 
-KUKSA_HOST = os.environ.get("KUKSA_HOST", "127.0.0.1")
-KUKSA_PORT = int(os.environ.get("KUKSA_PORT", "55555"))
+# 시간/주기: env.py가 fps=20이면 Δt=0.05
+CAM_DT        = float(os.environ.get("CAM_DT", "0.05"))  # Δt(s) — slip과 동일해야 함
+FRAME_INTERVAL= int(os.environ.get("FRAME_INTERVAL", "1"))  # n프레임마다 새 추론(1=매프레임)
+FORCE_QUANT   = os.environ.get("FORCE_QUANTIZE", "1") == "1" # Ts를 Δt 격자로 강제 스냅
 
-SAVE_DEBUG = os.environ.get("SAVE_DEBUG", "1") == "1"
-EMA_A   = float(os.environ.get("EMA_A", "0.3"))
+# 로깅(요청 포맷)
+LINE_WRAP     = int(os.environ.get("LINE_WRAP", "8"))  # 몇 개 찍고 줄바꿈할지
+_print_chunk_cnt = 0
 
+# 디버그
+SAVE_DEBUG    = os.environ.get("SAVE_DEBUG", "0") == "1"
+EMA_A         = float(os.environ.get("EMA_A", "0.3"))
+
+# ROI/임계값 (간단 룰 기반 분류)
 ROI_Y0=float(os.environ.get("ROI_Y0","0.5"))
 ROI_XL=float(os.environ.get("ROI_XL","0.2"))
 ROI_XR=float(os.environ.get("ROI_XR","0.8"))
@@ -32,12 +47,10 @@ TH_V_MEAN_I=float(os.environ.get("TH_V_MEAN_I","0.70"))
 TH_DR_SNOW=float(os.environ.get("TH_DR_SNOW","0.35"))
 TH_S_MEAN_S=float(os.environ.get("TH_S_MEAN_S","0.20"))
 
-# ========= 유틸 =========
+# ================== 유틸 ==================
 def _to_bytes(x):
     if x is None: return b""
     if isinstance(x, (bytes, bytearray, memoryview)): return bytes(x)
-    tb = getattr(x, "to_bytes", None)
-    if callable(tb): return tb()
     try: return bytes(x)
     except Exception: return b""
 
@@ -97,82 +110,144 @@ def overlay(bgr, m, roi_box, st, conf):
     cv2.putText(vis,t,(20,40),cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,255),2,cv2.LINE_AA)
     return vis
 
+# ================== 심시간 처리 ==================
+_last_ts = None
+_last_state, _last_conf = "unknown", 0.40
+_last_sri, _last_ed = None, None
+
+def derive_sim_ts(meta: dict) -> float:
+    """
+    우선순위: attachment.sim_ts → frame*CAM_DT → 내부 증가
+    이후 Δt 격자(CAM_DT)로 스냅(옵션)
+    """
+    global _last_ts
+    sim_ts = None
+
+    # 1) 첨부 sim_ts
+    v = meta.get("sim_ts")
+    if v is not None:
+        try:
+            sim_ts = float(v)
+        except Exception:
+            sim_ts = None
+
+    # 2) frame 기반
+    if sim_ts is None:
+        fr = meta.get("frame")
+        if fr is not None:
+            try:
+                sim_ts = int(fr) * CAM_DT
+            except Exception:
+                sim_ts = None
+
+    # 3) 내부 증가
+    if sim_ts is None:
+        sim_ts = 0.0 if _last_ts is None else (_last_ts + CAM_DT)
+
+    # 4) Δt 격자 스냅
+    if FORCE_QUANT and CAM_DT > 0:
+        n = int(round(sim_ts / CAM_DT))
+        sim_ts = round(n * CAM_DT, 6)
+
+    _last_ts = sim_ts
+    return sim_ts
+
+# ================== 메인 ==================
 def main():
-    # Kuksa 연결
+    # Kuksa
     kc = VSSClient(KUKSA_HOST, KUKSA_PORT); kc.connect()
     print(f"[Analyzer] Kuksa connected @ {KUKSA_HOST}:{KUKSA_PORT}")
 
-    # zenoh 연결
+    # Zenoh
     zcfg = zenoh.Config()
-    if hasattr(zcfg, "insert_json5"):
+    try:
         zcfg.insert_json5("connect/endpoints",'["tcp/127.0.0.1:7447"]')
-    else:
+    except AttributeError:
         zcfg.insert_json("connect/endpoints",'["tcp/127.0.0.1:7447"]')
     sess = zenoh.open(zcfg)
-    pub  = sess.declare_publisher("road/state") if OUT_ZENOH else None
+    print(f"[Analyzer] subscribing raw: {IN_KEY} (Δt={CAM_DT}s, every {FRAME_INTERVAL} frame(s) infer)")
 
     ema = EMA(EMA_A)
-    print(f"[Analyzer] subscribing raw: {IN_KEY}")
+    frame_cnt = 0
+
+    def publish_cam_vss(sim_ts, st=None, cf=None, sri=None, ed=None):
+        """매 프레임 반드시 호출: st/cf가 None이면 직전 값 재사용."""
+        global _last_state, _last_conf, _last_sri, _last_ed
+        if st is None: st = _last_state
+        if cf is None: cf = _last_conf
+
+        updates = {
+            "Vehicle.Private.Road.State":      Datapoint(st),
+            "Vehicle.Private.Road.Confidence": Datapoint(float(cf)),
+            "Vehicle.Private.Road.Ts":         Datapoint(float(sim_ts)),
+        }
+        if sri is not None:
+            updates["Vehicle.Private.Road.Metrics.SRI"] = Datapoint(float(sri))
+        if ed is not None:
+            updates["Vehicle.Private.Road.Metrics.ED"]  = Datapoint(float(ed))
+
+        kc.set_current_values(updates)
+
+        # 직전 상태 갱신(로깅/재사용)
+        _last_state, _last_conf = st, float(cf)
+        if sri is not None: _last_sri = float(sri)
+        if ed  is not None: _last_ed  = float(ed)
 
     def on_raw(sample: zenoh.Sample):
+        nonlocal frame_cnt
+        global _print_chunk_cnt
         try:
+            # ---- 메타 파싱 & 심시간 도출 ----
             meta_b = _attachment_bytes(sample)
             meta = json.loads(meta_b.decode("utf-8")) if meta_b else {}
             w = int(meta.get("w", 0)); h = int(meta.get("h", 0))
-            c = int(meta.get("c", 4)); stride = int(meta.get("stride", w*c))
-            if w<=0 or h<=0 or c<3 or stride != w*c:
-                return
+            c = int(meta.get("c", 4)); stride = int(meta.get("stride", max(0,w*c)))
+            sim_ts = derive_sim_ts(meta)
 
-            buf = _payload_buffer(sample)
-            bgra = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, c))
-            bgr = bgra[:,:,:3]
+            # ---- 추론 간헐 실행 여부 ----
+            do_infer = (FRAME_INTERVAL <= 1) or ((frame_cnt % FRAME_INTERVAL) == 0)
 
-            y0=int(h*ROI_Y0); y1=h; x0=int(w*ROI_XL); x1=int(w*ROI_XR)
-            m = compute_metrics(bgr, (x0,y0,x1,y1))
-            m = ema.update(m)
-            st, cf = classify(m)
+            # ---- 유효 페이로드 확인 ----
+            valid_img = (w>0 and h>0 and c>=3 and stride == w*c)
 
-            sim_ts = meta.get("sim_ts")
-            now_ts = time.time()
-            ts_val = float(sim_ts) if sim_ts is not None else float(now_ts)
+            st=cf=None
+            if do_infer and valid_img:
+                buf = _payload_buffer(sample)
+                bgra = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, c))
+                bgr = bgra[:,:,:3]
 
-            # SRI_rel (퓨저 힌트)
-            sri_rel = max(0.0, m["SRI"] - TH_SRI_WET)
+                # ROI & 메트릭
+                y0=int(h*ROI_Y0); y1=h; x0=int(w*ROI_XL); x1=int(w*ROI_XR)
+                m = compute_metrics(bgr, (x0,y0,x1,y1))
+                m = ema.update(m)
+                st, cf = classify(m)
 
-            # Kuksa publish (v2 스타일: set_current_values)
-            updates = {
-                "Vehicle.Private.Road.State":            Datapoint(st),
-                "Vehicle.Private.Road.Confidence":       Datapoint(float(cf)),
-                "Vehicle.Private.Road.Ts":               Datapoint(ts_val),
-                "Vehicle.Private.Road.Metrics.SRI":      Datapoint(float(m["SRI"])),
-                "Vehicle.Private.Road.Metrics.SRI_rel":  Datapoint(float(sri_rel)),
-                "Vehicle.Private.Road.Metrics.ED":       Datapoint(float(m["ED"])),
-            }
-            kc.set_current_values(updates)
+                publish_cam_vss(sim_ts, st, cf, sri=m["SRI"], ed=m["ED"])
 
-            # (옵션) 제노 JSON 동시 발행
-            if OUT_ZENOH and pub is not None:
-                msg = {
-                    "state": st,
-                    "confidence": round(float(cf),3),
-                    "metrics": {
-                        "SRI": round(float(m["SRI"]),4),
-                        "SRI_rel": round(float(sri_rel),4),
-                        "ED": round(float(m["ED"]),4)
-                    },
-                    "ts": ts_val,
-                    "frame": meta.get("frame")
-                }
-                pub.put(json.dumps(msg).encode("utf-8"))
+                if SAVE_DEBUG:
+                    vis = overlay(bgr, m, (x0,y0,x1,y1), st, cf)
+                    cv2.imwrite("debug_latest.jpg", vis)
+            else:
+                # 새 추론 건너뛰어도 매 프레임 Ts는 게시 (직전 결과 재사용)
+                publish_cam_vss(sim_ts)
 
-            if SAVE_DEBUG:
-                vis = overlay(bgr, m, (x0,y0,x1,y1), st, cf)
-                cv2.imwrite("debug_latest.jpg", vis)
+            # ---- 요청 포맷 로깅: 한 줄에 이어 붙이기 ----
+            use_state = (st if do_infer and st is not None else _last_state)
+            use_conf  = (cf if do_infer and cf is not None else _last_conf)
+            use_sri   = (_last_sri if _last_sri is not None else 0.0)
+            use_ed    = (_last_ed  if _last_ed  is not None else 0.0)
 
-            # 진행 로그 (과하지 않게)
-            print(f"[STATE] {st:<5} conf={cf:.2f} SRI={m['SRI']:.3f} ED={m['ED']:.3f} ts={ts_val:.3f}")
+            print(
+                f"[STATE] {use_state} conf={use_conf:.2f} "
+                f"SRI={use_sri:.3f} ED={use_ed:.3f} ts={sim_ts:.3f} "
+            )
+
+            frame_cnt += 1
 
         except Exception:
+            # 에러는 줄바꿈 후 출력해 흐름 유지
+            sys.stdout.write("\n")
+            sys.stdout.flush()
             print("[Analyzer] callback error:")
             traceback.print_exc()
 
