@@ -1,11 +1,14 @@
 import os, sys, time, json, math, argparse
 from typing import Optional
+from kuksa_client.grpc import VSSClient, Datapoint
+
 import numpy as np
 import cv2
 import carla
 import zenoh
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
+# --- Zenoh 환경 구축 ---
 cfg = zenoh.Config()
 try:
     cfg.insert_json5('mode', '"client"')
@@ -16,6 +19,16 @@ except AttributeError:
 
 sess = zenoh.open(cfg)
 pub  = sess.declare_publisher('carla/cam/front')
+
+
+# --- KUKSA Databroker client ---
+try:
+    from kuksa_client.grpc import DataBrokerClient  # SDK에 따라 클래스명이 다를 수 있음
+    db = DataBrokerClient("127.0.0.1", 55555)       # Databroker gRPC 엔드포인트
+    db.connect()
+except Exception as e:
+    db = None
+    print("[KUKSA] WARN: Failed to init Databroker client:", e)
 
 # =========================
 # 기본 파라미터
@@ -147,19 +160,35 @@ def main():
         arr = np.frombuffer(img.raw_data, dtype=np.uint8).reshape((img.height, img.width, 4))
         latest_front['bgr'] = arr[:, :, :3].copy()
 
-        print(f"[CAM] frame={img.frame:06d} sim_ts={img.timestamp:.3f} bytes={len(buf)}")
+        print(f"[CAM] frame={img.frame:06d}")
 
     cam.listen(on_cam)
 
     # ---------------- 콜백: 레이더 로그 ----------------
     def on_radar(meas: carla.RadarMeasurement):
-        count = len(meas)
-        nearest = min((d.depth for d in meas), default=None)
-        if nearest is not None:
-            print(f"[RADAR] frame={meas.frame:06d} detections={count} nearest_depth={nearest:.2f}m")
-        else:
-            print(f"[RADAR] frame={meas.frame:06d} detections={count}")
+        if len(meas) == 0:
+            # 타겟 없음
+            try:
+                db.set("Vehicle.ADAS.ACC.HasTarget", False)
+            except Exception as e:
+                print("[KUKSA] publish failed:", e)
+            return
 
+        # 가장 가까운 detection만 선택 (예: 최소 depth)
+        best = min(meas, key=lambda d: d.depth)
+
+        distance = float(best.depth)      # m
+        rel_speed = float(best.velocity)  # m/s (CARLA convention: +면 멀어짐, -면 접근)
+        
+        # publish to KUKSA
+        try:
+            db.set("Vehicle.ADAS.ACC.Distance", distance)
+            db.set("Vehicle.ADAS.ACC.RelSpeed", rel_speed)
+            db.set("Vehicle.ADAS.ACC.HasTarget", True)
+        except Exception as e:
+            print("[KUKSA] publish failed:", e)
+
+        print(f"[RADAR] frame={meas.frame} dist={distance:.1f}m rel_speed={rel_speed:+.1f}m/s")
     radar.listen(on_radar)
 
     # 창 생성 
