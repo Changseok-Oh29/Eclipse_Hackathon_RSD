@@ -1,6 +1,7 @@
 import os, sys, time, json, math, argparse
 from typing import Optional
-from kuksa_client.grpc import VSSClient, Datapoint nh
+from kuksa_client.grpc import VSSClient, Datapoint
+
 import numpy as np
 import cv2
 import carla
@@ -159,7 +160,7 @@ def main():
         arr = np.frombuffer(img.raw_data, dtype=np.uint8).reshape((img.height, img.width, 4))
         latest_front['bgr'] = arr[:, :, :3].copy()
 
-        print(f"[CAM] frame={img.frame:06d} sim_ts={img.timestamp:.3f} bytes={len(buf)}")
+        print(f"[CAM] frame={img.frame:06d}")
 
     cam.listen(on_cam)
 
