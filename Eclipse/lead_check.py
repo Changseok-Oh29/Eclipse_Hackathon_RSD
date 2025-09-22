@@ -3,21 +3,21 @@
 """
 lead_check.py — Pure Pursuit + 시나리오 속도제어 (리드 차량 μ=dry 고정)
 
-변경 요약:
-- 시나리오별 단일 날씨 적용(주행 중 전환 제거)
+요약:
 - 시나리오 0: 기존 루트(인덱스 20), 기본 날씨, 목표속도 60 km/h (커브 자동 감속 유지)
-- 시나리오 1~3: 두 번째 직선만 사용. 스폰 = 스폰포인트 53에서 차선방향 기준 200 m 뒤 지점
-  * S1: 기본 날씨, 60 km/h
-  * S2: Heavy Rain, 60 km/h
-  * S3: WetNoon, 55 km/h
-- 직선 시나리오(1~3) 포함 공통: 650~700 m 선형 감속, 700 m 정지
-- 충돌 발생 시 리드 차량 즉시 정지
+  · 감속 650 m → 정지 700 m
+- 시나리오 1~3: 두 번째 직선만 사용. 스폰 = 스폰포인트 53에서 차선방향 기준 200 m 뒤
+  · S1: 기본 날씨, 60 km/h
+  · S2: Heavy Rain, 60 km/h
+  · S3: WetNoon, 55 km/h + stop_zones(200 m, 400 m)에서 각각 5초 정지 후 재출발
+  · 감속 550 m → 정지 600 m
+- 리드 차량이 충돌 시 즉시 풀브레이크 정지 유지
 - 리드 차량 타이어 마찰계수 μ는 항상 dry 유지
-- TM/Autopilot/agents 미사용. 기본 spawn_idx=20(시나리오 0에서만 사용)
+- TM/Autopilot/agents 미사용, 키보드로 0/1/2/3 전환, q 종료
 """
 
 import sys, time, math, threading, queue
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import carla
 
@@ -30,19 +30,15 @@ def norm2d(x, y): return math.sqrt(x*x + y*y)
 def dot2d(ax, ay, bx, by): return ax*bx + ay*by
 
 # =========================
-# 두 번째 직선 기준 (기본값: 과거 고정 프레임)
-# 직선 시나리오에서는 동적으로 재설정
+# 두 번째 직선 s-프레임 (기본 값; 직선 시나리오에서 동적으로 재설정)
 # =========================
-DEFAULT_LINE_START = carla.Location(x=343.40,  y=21.69,  z=1.48)  # m 단위로 표기
+DEFAULT_LINE_START = carla.Location(x=343.40,  y=21.69,  z=1.48)  # meters
 DEFAULT_LINE_END   = carla.Location(x=-362.11, y=15.80,  z=1.65)
 
-RAIN_SWITCH_S  = 300.0   # (참고) 사용 안 함. 주행 중 날씨 전환 제거
-DECEL_START_S  = 650.0   # +650 m : 감속 시작
-STOP_S         = 700.0   # +700 m : 정지
-MAX_CRUISE_KMH = 60.0    # 선형 감속 상한 기준 속도
+MAX_CRUISE_KMH = 60.0  # 선형 감속 상한 기준 속도
 
 class TrackFrame:
-    """s 축(직선) 정의. start~end를 따라 s를 계산."""
+    """s 축(직선)을 정의하여 진행거리 s 계산"""
     def __init__(self, start: carla.Location, end: carla.Location):
         self.set_line(start, end)
     def set_line(self, start: carla.Location, end: carla.Location):
@@ -84,37 +80,36 @@ class PID:
 class Scenario:
     sid: int
     name: str
-    # pattern: (duration_sec, target_kmh)
+    # (duration_sec, target_kmh) — 여기서는 단일 타겟 속도로 사용
     pattern: List[Tuple[float, float]]
     loop: bool
-    route_type: str  # "mixed"(기존 루트) or "straight"(두 번째 직선)
-    weather: Optional[carla.WeatherParameters]  # None=현재 월드 날씨 유지
-    target_kmh: float  # 편의상 패턴 대신 단일 목표 속도 사용 시 참고
+    route_type: str  # "mixed" | "straight"
+    weather: Optional[carla.WeatherParameters]
+    target_kmh: float
+    decel_start: float
+    stop_s: float
+    stop_zones: List[float] = field(default_factory=list)   # 특정 s에서 강제 정지 이벤트
 
 def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenario:
-    # 시나리오 0: 기존 루트, 기본 날씨, 60 km/h
+    # S0: 기존 루트, 기본 날씨, 60 km/h, 650→700
     if sid == 0:
         return Scenario(
-            sid=0,
-            name="S0",
-            pattern=[(9999.0, 60.0)],  # 단일 속도(커브 감속은 별도 로직)
-            loop=True,
-            route_type="mixed",
-            weather=None,  # 기본 날씨 유지
-            target_kmh=60.0
+            sid=0, name="S0",
+            pattern=[(9999.0, 60.0)],
+            loop=True, route_type="mixed",
+            weather=None, target_kmh=60.0,
+            decel_start=650.0, stop_s=700.0
         )
-    # 시나리오 1: 직선, 기본 날씨, 60 km/h
+    # S1: 직선, 기본 날씨, 60 km/h, 550→600
     if sid == 1:
         return Scenario(
-            sid=1,
-            name="S1",
+            sid=1, name="S1",
             pattern=[(9999.0, 60.0)],
-            loop=True,
-            route_type="straight",
-            weather=None,  # 기본 날씨 유지
-            target_kmh=60.0
+            loop=True, route_type="straight",
+            weather=None, target_kmh=60.0,
+            decel_start=550.0, stop_s=600.0
         )
-    # 시나리오 2: 직선, Heavy Rain, 60 km/h
+    # S2: 직선, Heavy Rain, 60 km/h, 550→600
     if sid == 2:
         heavy = carla.WeatherParameters(
             cloudiness=85.0, precipitation=90.0, precipitation_deposits=80.0,
@@ -123,26 +118,24 @@ def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenari
             fog_density=8.0, fog_distance=0.0, fog_falloff=0.0
         )
         return Scenario(
-            sid=2,
-            name="S2",
+            sid=2, name="S2",
             pattern=[(9999.0, 60.0)],
-            loop=True,
-            route_type="straight",
-            weather=heavy,
-            target_kmh=60.0
+            loop=True, route_type="straight",
+            weather=heavy, target_kmh=60.0,
+            decel_start=550.0, stop_s=600.0
         )
-    # 시나리오 3: 직선, WetNoon, 55 km/h
+    # S3: 직선, WetNoon, 55 km/h, 200/400m 정지 이벤트 + 550→600 최종 정지
     if sid == 3:
         return Scenario(
-            sid=3,
-            name="S3",
+            sid=3, name="S3",
             pattern=[(9999.0, 55.0)],
-            loop=True,
-            route_type="straight",
+            loop=True, route_type="straight",
             weather=getattr(carla.WeatherParameters, "WetNoon"),
-            target_kmh=55.0
+            target_kmh=55.0,
+            decel_start=550.0, stop_s=600.0,
+            stop_zones=[200.0, 400.0]
         )
-    # 기본은 시나리오 0
+    # 기본은 S0
     return get_scenario(0, original_weather)
 
 # =========================
@@ -192,7 +185,7 @@ def start_input_thread(cmd_q: "queue.Queue[str]"):
     threading.Thread(target=_run, daemon=True).start()
 
 # =========================
-# 스폰 유틸 (직선 시나리오: 53번 기준 200 m 뒤)
+# 스폰 유틸
 # =========================
 def spawn_vehicle_at(world: carla.World, bp: carla.ActorBlueprint, tf: carla.Transform) -> carla.Vehicle:
     for dz in (0.0, 0.5, 1.0):
@@ -207,7 +200,6 @@ def spawn_vehicle_at(world: carla.World, bp: carla.ActorBlueprint, tf: carla.Tra
 def compute_straight_spawn(amap: carla.Map, sps: List[carla.Transform], base_index: int, back_m: float) -> carla.Transform:
     tf0 = sps[min(max(0,base_index),len(sps)-1)]
     wp = amap.get_waypoint(tf0.location, project_to_road=True, lane_type=carla.LaneType.Driving)
-    # 차선 방향으로 back_m 만큼 뒤로 이동
     prevs = wp.previous(back_m)
     base_wp = prevs[0] if prevs else wp
     return base_wp.transform
@@ -215,7 +207,6 @@ def compute_straight_spawn(amap: carla.Map, sps: List[carla.Transform], base_ind
 def update_track_frame_for_straight(amap: carla.Map, start_tf: carla.Transform, length_m: float=700.0) -> None:
     """직선 시나리오용 s 프레임 재설정: 시작=start_tf, 끝=start에서 length_m 앞으로"""
     global track_frame
-    # 앞으로 length_m 만큼 진척한 위치를 end로 사용
     wp = amap.get_waypoint(start_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
     acc = 0.0
     cur = wp
@@ -237,9 +228,8 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2000)
-    ap.add_argument("--spawn_idx", type=int, default=20)  # 시나리오 0에서 사용
+    ap.add_argument("--spawn_idx", type=int, default=20)  # S0에서 사용
     ap.add_argument("--dry_mu", type=float, default=3.0)
-    ap.add_argument("--wet_mu", type=float, default=1.6)  # (참고) 리드는 항상 dry 사용
     ap.add_argument("--start_scenario", type=int, default=0)  # 0~3
     ap.add_argument("--pp_gain", type=float, default=1.6)
     ap.add_argument("--lookahead_min", type=float, default=8.0)
@@ -251,10 +241,9 @@ def main():
     bp_lib=world.get_blueprint_library(); sps=amap.get_spawn_points()
     original_weather=world.get_weather()
 
-    # 충돌 센서
     collision_sensor_bp = bp_lib.find('sensor.other.collision')
 
-    # 월드 클린업(리드만 정리)
+    # 기존 차량 정리
     for a in world.get_actors().filter("vehicle.*"):
         try:a.destroy()
         except:pass
@@ -263,43 +252,37 @@ def main():
     def spawn_lead_for_scenario(scn: Scenario) -> carla.Vehicle:
         lead_bp=(bp_lib.filter('vehicle.audi.tt') or bp_lib.filter('vehicle.*'))[0]
         lead_bp.set_attribute('role_name','lead')
-
         if scn.route_type == "mixed":
             tf = sps[min(max(0, args.spawn_idx), len(sps)-1)]
             wp=amap.get_waypoint(tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
             base_tf=wp.transform
             v = spawn_vehicle_at(world, lead_bp, base_tf)
-            # s 프레임: 기존 DEFAULT 그대로
+            # 혼합 루트는 s-프레임 기본 값 유지
             track_frame.set_line(DEFAULT_LINE_START, DEFAULT_LINE_END)
             return v
         else:
-            # straight: 스폰포인트 53에서 차선방향 기준 200 m 뒤
+            # 직선 시나리오: 53번 기준 200 m 뒤
             tf_st = compute_straight_spawn(amap, sps, base_index=53, back_m=200.0)
             v = spawn_vehicle_at(world, lead_bp, tf_st)
-            # s 프레임 갱신 (700 m 직선 기준)
+            # 직선 700 m 기준 s-프레임 갱신
             update_track_frame_for_straight(amap, tf_st, length_m=700.0)
             return v
 
-    # 리드 차량 스폰
+    # 초기 시나리오/스폰
     sid=int(args.start_scenario); scenario=get_scenario(sid, original_weather)
-
     lead=spawn_lead_for_scenario(scenario)
-    apply_tire_friction(lead, args.dry_mu)   # 리드는 항상 dry_mu 유지
+    apply_tire_friction(lead, args.dry_mu)   # 리드는 항상 dry
 
-    # 충돌 센서 부착
+    # 충돌 감지
     collided_flag = {"hit": False}
     def on_collision(event):
-        other = event.other_actor
-        print(f"[COLLISION] 리드와 충돌: other={other.type_id}")
+        print(f"[COLLISION] 리드 차량 충돌 발생 with {event.other_actor.type_id}")
         collided_flag["hit"] = True
     collision_sensor = world.spawn_actor(collision_sensor_bp, carla.Transform(), attach_to=lead)
     collision_sensor.listen(on_collision)
 
-    # 날씨 적용(시나리오별 단일 날씨)
-    if scenario.weather is None:
-        world.set_weather(original_weather)
-    else:
-        world.set_weather(scenario.weather)
+    # 날씨 적용(시나리오별 단일)
+    world.set_weather(original_weather if scenario.weather is None else scenario.weather)
 
     path=build_forward_path(amap, lead.get_transform())
     speed_pid=PID(0.60, 0.05, 0.02)
@@ -318,6 +301,9 @@ def main():
     EMERG_KICK_DURATION=1.2; emerg_kick_until_ts=0.0
     stuck_since=None
 
+    # stop_zones 상태 머신 (S3 등에서 사용)
+    stop_state = {"active": False, "resume_ts": 0.0, "visited": set()}  # visited에 이미 처리한 stop zone 저장
+
     cmd_q: "queue.Queue[str]" = queue.Queue()
     start_input_thread(cmd_q)
 
@@ -329,20 +315,18 @@ def main():
             dt = snap.timestamp.delta_seconds if snap else last_dt; last_dt=dt
             now=time.time()
 
-            # 입력 처리
+            # 키 입력
             try: cmd=cmd_q.get_nowait()
             except queue.Empty: cmd=None
             if cmd in ("q","Q"): break
 
             # 시나리오 전환
             if cmd in ("0","1","2","3"):
-                # 리드 및 센서 정리
                 try: collision_sensor.stop()
                 except: pass
                 for a in world.get_actors().filter("vehicle.*"):
                     try:a.destroy()
                     except:pass
-                # 날씨 복구 후, 새 시나리오 날씨 적용
                 world.set_weather(original_weather)
 
                 sid=int(cmd); scenario=get_scenario(sid, original_weather)
@@ -354,56 +338,75 @@ def main():
                 prev_kmh_cmd=scenario.pattern[0][1]
                 kick_until_ts=0.0; emerg_kick_until_ts=0.0; stuck_since=None
                 collided_flag["hit"]=False
+                stop_state = {"active": False, "resume_ts": 0.0, "visited": set()}
 
-                # 충돌 센서 재부착
                 collision_sensor = world.spawn_actor(collision_sensor_bp, carla.Transform(), attach_to=lead)
                 collision_sensor.listen(on_collision)
 
-                # 시나리오별 날씨 재적용
-                if scenario.weather is None:
-                    world.set_weather(original_weather)
-                else:
-                    world.set_weather(scenario.weather)
-
+                world.set_weather(original_weather if scenario.weather is None else scenario.weather)
                 print(f"\n[SCENARIO] {scenario.name}")
                 continue
 
-            # 충돌 시 즉시 정지 유지
+            # 충돌 시 즉시 정지
             if collided_flag["hit"]:
-                lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0, hand_brake=False))
+                lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
                 speed_pid.reset()
                 continue
 
+            # 현재 상태
             tf_cur=lead.get_transform(); loc=tf_cur.location; yaw=tf_cur.rotation.yaw
             vv=lead.get_velocity(); speed=math.sqrt(vv.x*vv.x + vv.y*vv.y + vv.z*vv.z); speed_kmh=3.6*speed
             if idx_hint>len(path)-50: path=build_forward_path(amap, tf_cur); idx_hint=0
-
-            # 진행도 s
             s_on_line = track_frame.s_on_line(loc)
 
-            # +700m: 정지 (직선 시나리오/혼합 루트 공통)
-            if s_on_line >= STOP_S:
+            # stop_zones(예: S3의 200/400m) 처리
+            # active 상태면 5초간 멈춤 유지 후 해제
+            if stop_state["active"]:
+                if now >= stop_state["resume_ts"]:
+                    # 재출발
+                    stop_state["active"] = False
+                    speed_pid.reset()
+                    # 재출발 킥 살짝 주도록 아래 일반 로직에서 처리
+                else:
+                    # 멈춤 유지
+                    lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
+                    continue
+            else:
+                # 아직 방문 안 한 stop zone에 들어왔는지 확인 (±5 m 허용)
+                for sz in scenario.stop_zones:
+                    if sz in stop_state["visited"]: 
+                        continue
+                    if abs(s_on_line - sz) <= 5.0:
+                        print(f"[EVENT] Stop zone at {sz:.1f} m → full stop 5s")
+                        stop_state["visited"].add(sz)
+                        stop_state["active"] = True
+                        stop_state["resume_ts"] = now + 5.0
+                        # 즉시 정지 적용
+                        lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
+                        speed_pid.reset()
+                        continue  # 다음 틱부터 active 분기로 유지
+
+            # 최종 정지 구간(시나리오별)
+            if s_on_line >= scenario.stop_s:
                 lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
                 speed_pid.reset()
-                # 멈춘 상태 유지
                 continue
 
-            # 시나리오 진행(여기서는 단일 속도 정책)
+            # 시나리오 진행(단일 속도 정책)
             duration, kmh_cmd = scenario.pattern[seg_i]
             if seg_elapsed >= duration:
                 seg_i += 1; seg_elapsed = 0.0
                 if seg_i >= len(scenario.pattern):
-                    if scenario.loop: seg_i = 0
-                    else: seg_i=len(scenario.pattern)-1
+                    seg_i = 0 if scenario.loop else len(scenario.pattern)-1
                 duration, kmh_cmd = scenario.pattern[seg_i]
             seg_elapsed += dt
 
-            # 650~700 m 선형 감속
-            if DECEL_START_S <= s_on_line < STOP_S:
-                v_allow = MAX_CRUISE_KMH * (STOP_S - s_on_line) / (STOP_S - DECEL_START_S)
+            # 선형 감속 (시나리오별 decel_start→stop_s)
+            if scenario.decel_start <= s_on_line < scenario.stop_s:
+                v_allow = MAX_CRUISE_KMH * (scenario.stop_s - s_on_line) / max((scenario.stop_s - scenario.decel_start), 1e-3)
                 kmh_cmd = min(kmh_cmd, v_allow)
 
-            # 커브 감속(시나리오 0에서 효과적, 직선 시나리오는 영향 거의 없음)
+            # 커브 감속(시나리오 0에서 주로 영향)
             try:
                 wp_now = amap.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
                 next_wps = wp_now.next(25.0)
@@ -412,9 +415,10 @@ def main():
                     yaw_diff = abs(deg_wrap180(yaw_next - wp_now.transform.rotation.yaw))
                     if yaw_diff > 25: kmh_cmd = min(kmh_cmd, 30.0)
                     elif yaw_diff > 12: kmh_cmd = min(kmh_cmd, 40.0)
-            except: pass
+            except: 
+                pass
 
-            # Pure Pursuit
+            # Pure Pursuit 조향
             lookahead = clamp(lookahead_min + (lookahead_max - lookahead_min)*(speed_kmh/80.0),
                               lookahead_min, lookahead_max)
             idx_hint, tf_tgt = find_lookahead_target(path, loc, lookahead, idx_hint)
@@ -430,19 +434,21 @@ def main():
             a_cmd = speed_pid.step(v_ref - speed, dt)
             throttle=0.0; brake=0.0
 
-            # 출발 킥 조건(정지→가속)
+            # 정지→출발 킥
             if ((prev_kmh_cmd <= 0.1) or (speed < STUCK_SPEED_MS)) and (kmh_cmd > 0.1):
                 if now >= kick_until_ts: kick_until_ts = now + KICK_DURATION
 
-            # 스턱 감시 → 비상 킥
+            # 스턱 감지 → 비상 킥
             if kmh_cmd > 0.1:
                 if speed < STUCK_SPEED_MS:
                     if stuck_since is None: stuck_since = now
                     elif (now - stuck_since) >= STUCK_TIMEOUT:
                         emerg_kick_until_ts = now + EMERG_KICK_DURATION
                         stuck_since = None
-                else: stuck_since=None
-            else: stuck_since=None
+                else:
+                    stuck_since=None
+            else:
+                stuck_since=None
 
             if now < emerg_kick_until_ts:
                 throttle = max(throttle, 0.60); brake=0.0
@@ -462,7 +468,8 @@ def main():
     finally:
         try:
             world.set_weather(original_weather)
-        except: pass
+        except: 
+            pass
         for a in world.get_actors().filter("vehicle.*"):
             try:a.destroy()
             except:pass
