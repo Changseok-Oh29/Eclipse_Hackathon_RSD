@@ -1,0 +1,53 @@
+{
+  "Vehicle": {
+    "type": "branch",
+    "description": "Root of VSS",
+    "children": {
+      "ADAS": {
+        "type": "branch",
+        "description": "Advanced Driver Assistance Systems",
+        "children": {
+          "ACC": {
+            "type": "branch",
+            "description": "ACC input signals from CARLA radar",
+            "children": {
+              "Distance": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m",
+                "min": 0.0,
+                "max": 500.0,
+                "description": "Distance to lead vehicle"
+              },
+              "RelSpeed": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "description": "Closing rate (+ means approaching)"
+              },
+              "TTC": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "s",
+                "description": "Time-to-collision (infinite if opening)"
+              },
+              "HasTarget": {
+                "type": "sensor",
+                "datatype": "boolean",
+                "description": "Whether a valid radar target is tracked"
+              },
+              "LeadSpeedEst": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "min": 0.0,
+                "max": 100.0,
+                "description": "Estimated lead vehicle speed"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
