@@ -1,21 +1,41 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os, time, json, argparse
 import numpy as np
 import cv2
 import zenoh
-
+from kuksa_client.grpc import VSSClient, Datapoint
 # Wayland에서 OpenCV 창을 띄울 때 권장
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 from common.LK_algo import (
     detect_lanes_and_center, fuse_lanes_with_memory,
-    lane_mid_x, lookahead_ratio
+    lane_mid_x, lookahead_ratio, gains_for_speed
 )
 from common.acc_algo import ACCController, ACCInputs
 
 DEF_TOPIC_CAM = "carla/cam/front"  # 공유 메모리에서 받아올 카메라 데이터
+
+# KUKSA 관련 wrapper
+# =================================================================
+_last_steer = 0.0  # 직전 값 재사용용
+
+def publish_steer(kuksa: VSSClient, st):
+    """
+    decision이 매 프레임 호출.
+    st가 None이면 직전값을 재사용해 항상 게시 보장.
+    """
+    global _last_steer
+    if st is None:
+        st = _last_steer
+    else:
+        _last_steer = float(st)
+
+    updates = {
+        "Vehicle.ADAS.LK.Steering": Datapoint(float(st))
+    }
+    # 분석기와 동일한 API
+    kuksa.set_current_values(updates)
+# =================================================================
+
 
 # LK 관련 유틸 함수
 # ==================================================================
@@ -41,7 +61,11 @@ def main():
     ap.add_argument("--topic_cam", default=DEF_TOPIC_CAM)
     ap.add_argument("--fps", type=int, default=20)
 
-    # 탐지 파라미터 (필요 최소만)
+    # KUKSA 관련 파라미터
+    ap.add_argument("--kuksa_host", default="127.0.0.1")
+    ap.add_argument("--kuksa_port", type=int, default=55555)    
+
+    # 탐지 파라미터
     ap.add_argument("--roi_json", type=str, default="", help="픽셀 좌표 폴리곤 JSON (미지정 시 기본 ROI)")
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=580)
@@ -56,7 +80,6 @@ def main():
     ap.add_argument("--display", type=int, default=1)   # 시각화 on/off
     ap.add_argument("--print", type=int, default=1)     # 로그 on/off
     args = ap.parse_args()
-
     dt = 1.0 / max(1, args.fps)
 
     # Zenoh 세션 (카메라 구독)
@@ -68,6 +91,12 @@ def main():
         cfg.insert_json("mode", '"client"')
         cfg.insert_json("connect/endpoints", f'["{args.zenoh_endpoint}"]')
     z = zenoh.open(cfg)
+
+    # KUKSA 연결
+    kuksa = VSSClient(args.kuksa_host, args.kuksa_port)
+    kuksa.connect()
+    print(f"[decision_LK] Kuksa connected @ {args.kuksa_host}:{args.kuksa_port}")
+
 
     latest = {"bgr": None, "meta": {}, "ts": 0.0}
     no_frame_tick = 0
@@ -163,6 +192,7 @@ def main():
                     hough_min_len=args.hough_min_len,
                     hough_max_gap=args.hough_max_gap,
                 )
+
                 used_left, used_right, center_line, _center_x = fuse_lanes_with_memory(
                     lanes, frame_id, lane_mem, ttl_frames=args.lane_mem_ttl
                 )
@@ -175,11 +205,24 @@ def main():
                     x_lane_mid, _, _ = lane_mid_x(used_left, used_right, y_anchor)
                     lane_mem["center_x"] = x_lane_mid
 
+                st = 0.0
+                if x_lane_mid is not None:
+                    offset_px = (x_lane_mid - x_cam_mid)   # +: 우측으로 치우침
+                    # 속도 추정이 없으니 v_kmh=0으로 시작, 필요시 Zenoh/Carla에서 속도 구독해 갱신
+                    v_kmh = 0.0
+                    kp, st_clip = gains_for_speed(v_kmh / 3.6)  # 함수는 m/s 입력, 여기선 0
+                    st = float(max(-st_clip, min(st_clip, kp * offset_px)))  # 좌:-, 우:+ 방향 유지
+                else:
+                    st = 0.0  # 차선 미검출 시 0으로
+
+                # KUKSA 이용하여 steering Publish
+                publish_steer(kuksa, st)             
+
                 ############## 변수 구독 필요
                 v_kmh = 0
                 thr = 0
                 brk = 0
-                st = 0
+                # st = 0
                 ###############
                 
                 if args.print:
@@ -222,6 +265,7 @@ def main():
                 break
 
     finally:
+        kuksa.close()
         try: sub_cam.undeclare()
         except Exception as e: print("[WARN] sub_cam.undeclare:", e)
         try: z.close()

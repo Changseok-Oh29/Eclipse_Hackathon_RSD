@@ -1,6 +1,5 @@
 import os, sys, time, json, math, argparse
 from typing import Optional
-from kuksa_client.grpc import VSSClient, Datapoint
 
 import numpy as np
 import cv2
@@ -19,16 +18,6 @@ except AttributeError:
 
 sess = zenoh.open(cfg)
 pub  = sess.declare_publisher('carla/cam/front')
-
-
-# --- KUKSA Databroker client ---
-try:
-    from kuksa_client.grpc import DataBrokerClient  # SDK에 따라 클래스명이 다를 수 있음
-    db = DataBrokerClient("127.0.0.1", 55555)       # Databroker gRPC 엔드포인트
-    db.connect()
-except Exception as e:
-    db = None
-    print("[KUKSA] WARN: Failed to init Databroker client:", e)
 
 # =========================
 # 기본 파라미터
@@ -78,7 +67,7 @@ def main():
     if ego is None:
         raise RuntimeError("Failed to spawn Ego. Try another spawn_idx or free the spawn point.")
 
-    # lead + TM
+    # lead (TM 없이 스폰만 하고 정지 유지)
     lead_bp = (bp.filter('vehicle.audi.tt') or bp.filter('vehicle.*'))[0]
     lead_bp.set_attribute('role_name', 'lead')
     ego_wp = world.get_map().get_waypoint(tf.location)
@@ -87,19 +76,10 @@ def main():
     lead_tf.location.z = tf.location.z
     lead = world.try_spawn_actor(lead_bp, lead_tf)
     if lead:
-        for port in range(8000, 8010):
-            try:
-                tm = client.get_trafficmanager(port); tm.set_synchronous_mode(True); tm_port = port; break
-            except RuntimeError:
-                tm = None
-        if tm is not None:
-            tm.auto_lane_change(lead, False)
-            lead.set_autopilot(True, tm_port)
-            print(f"[INFO] Lead autopilot ON via TM:{tm_port}")
-        else:
-            lead.set_autopilot(False)
-            lead.apply_control(carla.VehicleControl(throttle=0.20))
-            print("[WARN] No TM port free, lead moves with constant low throttle.")
+        # 정지 유지
+        lead.set_autopilot(False)
+        lead.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+        print("[INFO] Lead spawned and kept stopped.")
 
     # chase camera
     chase = None
@@ -167,11 +147,7 @@ def main():
     # ---------------- 콜백: 레이더 로그 ----------------
     def on_radar(meas: carla.RadarMeasurement):
         if len(meas) == 0:
-            # 타겟 없음
-            try:
-                db.set("Vehicle.ADAS.ACC.HasTarget", False)
-            except Exception as e:
-                print("[KUKSA] publish failed:", e)
+            # 타겟 없음 (KUKSA 제거: 상태 publish 생략)
             return
 
         # 가장 가까운 detection만 선택 (예: 최소 depth)
@@ -179,16 +155,10 @@ def main():
 
         distance = float(best.depth)      # m
         rel_speed = float(best.velocity)  # m/s (CARLA convention: +면 멀어짐, -면 접근)
-        
-        # publish to KUKSA
-        try:
-            db.set("Vehicle.ADAS.ACC.Distance", distance)
-            db.set("Vehicle.ADAS.ACC.RelSpeed", rel_speed)
-            db.set("Vehicle.ADAS.ACC.HasTarget", True)
-        except Exception as e:
-            print("[KUKSA] publish failed:", e)
 
+        # KUKSA 제거: publish 생략, 로그만 유지
         print(f"[RADAR] frame={meas.frame} dist={distance:.1f}m rel_speed={rel_speed:+.1f}m/s")
+
     radar.listen(on_radar)
 
     # 창 생성 
