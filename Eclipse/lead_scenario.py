@@ -3,13 +3,13 @@
 """
 lead_scenario.py — Pure Pursuit + 시나리오 속도제어 (env.py에서 만든 ego/lead 제어)
 
-요약:
-- env.py에서 ego/lead 차량 스폰 → 이 파일은 ego/lead를 찾아와 제어
-- 시나리오 0: ego=spawn idx 20, lead=앞쪽 30 m
-- 시나리오 1~3: ego=spawn idx 53, lead=앞쪽 30 m
-- 날씨는 시나리오별로 변경
-- 리드 차량 μ 항상 dry 유지
-- 키보드: 0/1/2/3 전환, q 종료
+시나리오:
+- S0: ego=spawn idx 20, lead=앞쪽 30 m, 목표속도 60 km/h, 커브 감속 포함, 650~700m 감속/정지
+- S1: ego=53번 spawn 기준 250 m 뒤, lead=앞쪽 30 m, 60 km/h, 700~750m 감속/정지
+- S2: S1과 동일 + HeavyRain 날씨
+- S3: ego=53번 spawn 기준 250 m 뒤, lead=앞쪽 30 m, 55 km/h,
+      stop zones=[200m,400m]: -4 m/s² 감속 → 0 km/h → 5초 정지 후 재출발,
+      최종 700~750m 감속/정지
 """
 
 import sys, time, math, threading, queue
@@ -88,7 +88,7 @@ def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenari
                         None, 60.0, 650.0, 700.0)
     if sid == 1:
         return Scenario(1, "S1", [(9999.0, 60.0)], True,
-                        None, 60.0, 550.0, 600.0)
+                        None, 60.0, 700.0, 750.0)
     if sid == 2:
         heavy = carla.WeatherParameters(
             cloudiness=85.0, precipitation=90.0, precipitation_deposits=80.0,
@@ -97,11 +97,11 @@ def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenari
             fog_density=8.0, fog_distance=0.0, fog_falloff=0.0
         )
         return Scenario(2, "S2", [(9999.0, 60.0)], True,
-                        heavy, 60.0, 550.0, 600.0)
+                        heavy, 60.0, 700.0, 750.0)
     if sid == 3:
         return Scenario(3, "S3", [(9999.0, 55.0)], True,
                         getattr(carla.WeatherParameters, "WetNoon"),
-                        55.0, 550.0, 600.0, stop_zones=[200.0, 400.0])
+                        55.0, 700.0, 750.0, stop_zones=[200.0, 400.0])
     return get_scenario(0, original_weather)
 
 # =========================
@@ -175,19 +175,26 @@ def reset_positions(world, amap, ego, lead, scenario: Scenario, sps: List[carla.
     if scenario.sid == 0:
         base_tf = sps[20]
     else:
-        base_tf = sps[53]
+        # 53번 인덱스 기준으로 250 m 뒤
+        tf53 = sps[53]
+        wp = amap.get_waypoint(tf53.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+        prevs = wp.previous(250.0)
+        base_wp = prevs[0] if prevs else wp
+        base_tf = base_wp.transform
 
-    # ego 위치 리셋
+    ego_tf = carla.Transform(
+        carla.Location(x=base_tf.location.x, y=base_tf.location.y, z=base_tf.location.z + 1.0),
+        base_tf.rotation
+    )
     ego.set_simulate_physics(False)
-    ego.set_transform(base_tf)
+    ego.set_transform(ego_tf)
     ego.set_simulate_physics(True)
 
-    # lead = ego 앞쪽 30m
-    wp = amap.get_waypoint(base_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+    wp = amap.get_waypoint(ego_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
     forward = wp.next(30.0)
     if forward:
         lead_tf = forward[0].transform
-        lead_tf.location.z = base_tf.location.z
+        lead_tf.location.z = ego_tf.location.z + 1.0
         lead.set_simulate_physics(False)
         lead.set_transform(lead_tf)
         lead.set_simulate_physics(True)
@@ -230,11 +237,14 @@ def main():
 
     prev_kmh_cmd=scenario.pattern[0][1]
 
+    # 출발 킥 & 스턱 감지
     KICK_DURATION=1.0; KICK_THROTTLE=0.55; kick_until_ts=0.0
     STUCK_SPEED_MS=0.5; STUCK_TIMEOUT=2.0
     EMERG_KICK_DURATION=1.2; emerg_kick_until_ts=0.0
     stuck_since=None
-    stop_state = {"active": False, "resume_ts": 0.0, "visited": set()}
+
+    # stop zone 상태 (S3 전용)
+    stop_state = {"active": False, "resume_ts": 0.0, "visited": set(), "decel": False}
 
     cmd_q: "queue.Queue[str]" = queue.Queue()
     start_input_thread(cmd_q)
@@ -258,36 +268,49 @@ def main():
                 seg_i, seg_elapsed=0, 0.0
                 prev_kmh_cmd=scenario.pattern[0][1]
                 kick_until_ts=0.0; emerg_kick_until_ts=0.0; stuck_since=None
-                stop_state = {"active": False, "resume_ts": 0.0, "visited": set()}
+                stop_state = {"active": False, "resume_ts": 0.0, "visited": set(), "decel": False}
                 world.set_weather(original_weather if scenario.weather is None else scenario.weather)
                 print(f"\n[SCENARIO] {scenario.name}")
                 continue
 
-            # ===== 제어 루프 (lead) =====
+            # 현재 상태
             tf_cur=lead.get_transform(); loc=tf_cur.location; yaw=tf_cur.rotation.yaw
             vv=lead.get_velocity(); speed=math.sqrt(vv.x*vv.x + vv.y*vv.y + vv.z*vv.z); speed_kmh=3.6*speed
             if idx_hint>len(path)-50: path=build_forward_path(amap, tf_cur); idx_hint=0
             s_on_line = track_frame.s_on_line(loc)
 
-            # stop_zones
-            if stop_state["active"]:
-                if now >= stop_state["resume_ts"]:
-                    stop_state["active"] = False
-                    speed_pid.reset()
+            # stop zones (S3: -4 m/s² 감속 후 정지)
+            if scenario.sid == 3:
+                if stop_state["active"]:
+                    if now >= stop_state["resume_ts"]:
+                        stop_state["active"] = False
+                        stop_state["decel"] = False
+                        speed_pid.reset()
+                    else:
+                        lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
+                        continue
                 else:
-                    lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
-                    continue
-            else:
-                for sz in scenario.stop_zones:
-                    if sz in stop_state["visited"]: continue
-                    if abs(s_on_line - sz) <= 5.0:
-                        print(f"[EVENT] Stop zone at {sz:.1f} m → full stop 5s")
-                        stop_state["visited"].add(sz)
+                    for sz in scenario.stop_zones:
+                        if sz in stop_state["visited"]: continue
+                        if abs(s_on_line - sz) <= 5.0:
+                            print(f"[EVENT] Stop zone at {sz:.1f} m → decel -4 m/s² to stop")
+                            stop_state["visited"].add(sz)
+                            stop_state["decel"] = True
+                            break
+                if stop_state["decel"]:
+                    # 목표 속도 = 현재속도 - 4*dt
+                    v_target = max(0.0, speed - 4.0*dt)
+                    if v_target <= 0.1 and speed <= 0.5:
                         stop_state["active"] = True
                         stop_state["resume_ts"] = now + 5.0
+                        stop_state["decel"] = False
                         lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
-                        speed_pid.reset()
                         continue
+                    kmh_cmd = v_target*3.6
+                else:
+                    kmh_cmd = scenario.target_kmh
+            else:
+                kmh_cmd = scenario.target_kmh
 
             # 최종 정지
             if s_on_line >= scenario.stop_s:
@@ -295,19 +318,7 @@ def main():
                 speed_pid.reset()
                 continue
 
-            # 목표 속도
-            duration, kmh_cmd = scenario.pattern[seg_i]
-            if seg_elapsed >= duration:
-                seg_i += 1; seg_elapsed = 0.0
-                if seg_i >= len(scenario.pattern):
-                    seg_i = 0 if scenario.loop else len(scenario.pattern)-1
-                duration, kmh_cmd = scenario.pattern[seg_i]
-            seg_elapsed += dt
-
-            if scenario.decel_start <= s_on_line < scenario.stop_s:
-                v_allow = MAX_CRUISE_KMH * (scenario.stop_s - s_on_line) / max((scenario.stop_s - scenario.decel_start), 1e-3)
-                kmh_cmd = min(kmh_cmd, v_allow)
-
+            # 커브 감속
             try:
                 wp_now = amap.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
                 next_wps = wp_now.next(25.0)
@@ -333,18 +344,6 @@ def main():
             v_ref = kmh_cmd / 3.6
             a_cmd = speed_pid.step(v_ref - speed, dt)
             throttle=0.0; brake=0.0
-
-            if ((prev_kmh_cmd <= 0.1) or (speed < STUCK_SPEED_MS)) and (kmh_cmd > 0.1):
-                if now >= kick_until_ts: kick_until_ts = now + KICK_DURATION
-
-            if kmh_cmd > 0.1:
-                if speed < STUCK_SPEED_MS:
-                    if stuck_since is None: stuck_since = now
-                    elif (now - stuck_since) >= STUCK_TIMEOUT:
-                        emerg_kick_until_ts = now + EMERG_KICK_DURATION
-                        stuck_since = None
-                else: stuck_since=None
-            else: stuck_since=None
 
             if now < emerg_kick_until_ts:
                 throttle = max(throttle, 0.60); brake=0.0
