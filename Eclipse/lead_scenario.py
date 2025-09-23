@@ -182,17 +182,22 @@ def reset_positions(world, amap, ego, lead, scenario: Scenario, sps: List[carla.
         base_wp = prevs[0] if prevs else wp
         base_tf = base_wp.transform
 
-    # ego 위치 리셋
+    # z 높이를 +1.0 해서 ego 순간이동
+    ego_tf = carla.Transform(
+        carla.Location(x=base_tf.location.x, y=base_tf.location.y, z=base_tf.location.z + 1.0),
+        base_tf.rotation
+    )
     ego.set_simulate_physics(False)
-    ego.set_transform(base_tf)
+    ego.set_transform(ego_tf)
     ego.set_simulate_physics(True)
 
-    # lead = ego 앞쪽 30m
-    wp = amap.get_waypoint(base_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+    # lead = ego 앞쪽 30 m
+    wp = amap.get_waypoint(ego_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
     forward = wp.next(30.0)
     if forward:
         lead_tf = forward[0].transform
-        lead_tf.location.z = base_tf.location.z
+        # lead도 z 높이 +1.0 적용
+        lead_tf.location.z = ego_tf.location.z + 1.0
         lead.set_simulate_physics(False)
         lead.set_transform(lead_tf)
         lead.set_simulate_physics(True)
