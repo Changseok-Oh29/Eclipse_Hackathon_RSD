@@ -3,19 +3,22 @@
 """
 lead_scenario.py — Pure Pursuit + 시나리오 속도제어 (env.py에서 만든 lead를 제어)
 
-요구사항:
-- env.py에서 ego/lead를 스폰하면, 이 파일은 기존 lead만 찾아와서 제어한다.
-- 1/2/3/4 공통 로직: 커브 자동 감속, 650~700 m 선형 감속, 700 m 정지
-- 시나리오 전환(1/2/3/4) 또는 Ctrl+C 종료 시: 날씨를 '원래 날씨'로 복구
-- +300 m에서 Heavy Rain으로 날씨 변경 (lead μ는 그대로 유지)
-- S4에서 '정지→재출발'이 항상 일어나도록:
-  * 0→가속 전환 시 출발 킥(기본 1.0 s, 스로틀 0.55)
-  * kmh_cmd>0 인데도 2초 이상 0.5 m/s 미만이면 비상 킥(1.2 s) 발동
+요약:
+- 시나리오 0: 기존 루트(혼합), 기본 날씨, 목표속도 60 km/h
+  · 감속 650 m → 정지 700 m
+- 시나리오 1~3: 두 번째 직선만 사용 (lead는 env.py에서 이미 스폰됨)
+  · S1: 기본 날씨, 60 km/h
+  · S2: Heavy Rain, 60 km/h
+  · S3: WetNoon, 55 km/h + stop_zones(200 m, 400 m)에서 각각 5초 정지 후 재출발
+  · 감속 550 m → 정지 600 m
+- 리드 차량이 충돌 시 즉시 풀브레이크 정지 유지
+- 리드 차량 타이어 마찰계수 μ는 항상 dry 유지
+- TM/Autopilot/agents 미사용, 키보드로 0/1/2/3 전환, q 종료
 """
 
 import sys, time, math, threading, queue
-from dataclasses import dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
 import carla
 
 # =========================
@@ -25,31 +28,35 @@ def clamp(v, lo, hi): return lo if v < lo else hi if v > hi else v
 def deg_wrap180(a): return (a + 180.0) % 360.0 - 180.0
 def norm2d(x, y): return math.sqrt(x*x + y*y)
 def dot2d(ax, ay, bx, by): return ax*bx + ay*by
-def _cm(x): return x/100.0
 
 # =========================
-# 두 번째 직선 기준
+# s-프레임 정의
 # =========================
-SECOND_STRAIGHT_START = carla.Location(x=_cm(34340),  y=_cm(2169),  z=_cm(148))
-SECOND_STRAIGHT_END   = carla.Location(x=_cm(-36211), y=_cm(1580),  z=_cm(165))
+class TrackFrame:
+    def __init__(self, start: carla.Location, end: carla.Location):
+        self.set_line(start, end)
+    def set_line(self, start: carla.Location, end: carla.Location):
+        self.sx, self.sy = start.x, start.y
+        self.ex, self.ey = end.x, end.y
+        dx, dy = (self.ex - self.sx), (self.ey - self.sy)
+        self.L = norm2d(dx, dy)
+        if self.L < 1e-6:
+            self.ux, self.uy = 1.0, 0.0
+        else:
+            self.ux, self.uy = dx/self.L, dy/self.L
+    def s_on_line(self, p: carla.Location) -> float:
+        if self.L < 1e-6: return -1e9
+        px, py = p.x - self.sx, p.y - self.sy
+        return dot2d(px, py, self.ux, self.uy)
 
-RAIN_SWITCH_S  = 300.0
-DECEL_START_S  = 650.0
-STOP_S         = 700.0
+DEFAULT_LINE_START = carla.Location(x=343.40,  y=21.69,  z=1.48)
+DEFAULT_LINE_END   = carla.Location(x=-362.11, y=15.80,  z=1.65)
+track_frame = TrackFrame(DEFAULT_LINE_START, DEFAULT_LINE_END)
+
 MAX_CRUISE_KMH = 60.0
 
-def along_track_s_on_second_straight(p: carla.Location) -> float:
-    sx, sy = SECOND_STRAIGHT_START.x, SECOND_STRAIGHT_START.y
-    ex, ey = SECOND_STRAIGHT_END.x,   SECOND_STRAIGHT_END.y
-    dx, dy = (ex - sx), (ey - sy)
-    L = norm2d(dx, dy)
-    if L < 1e-3: return -1e9
-    ux, uy = dx/L, dy/L
-    px, py = p.x - sx, p.y - sy
-    return dot2d(px, py, ux, uy)
-
 # =========================
-# PID
+# PID (속도 제어)
 # =========================
 class PID:
     def __init__(self, kp, ki, kd, i_limit=2.0):
@@ -65,51 +72,59 @@ class PID:
         return self.kp*e + self.ki*self.i + self.kd*d
 
 # =========================
-# 시나리오
+# 시나리오 정의
 # =========================
 @dataclass
 class Scenario:
+    sid: int
     name: str
     pattern: List[Tuple[float, float]]
     loop: bool
+    route_type: str
+    weather: Optional[carla.WeatherParameters]
+    target_kmh: float
+    decel_start: float
+    stop_s: float
+    stop_zones: List[float] = field(default_factory=list)
 
-def get_scenario(sid: int) -> Scenario:
+def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenario:
+    if sid == 0:
+        return Scenario(0, "S0", [(9999.0, 60.0)], True, "mixed",
+                        None, 60.0, 650.0, 700.0)
     if sid == 1:
-        return Scenario("S1", [(8.0,30.0),(8.0,45.0),(8.0,60.0),(6.0,35.0),(10.0,60.0)], False)
+        return Scenario(1, "S1", [(9999.0, 60.0)], True, "straight",
+                        None, 60.0, 550.0, 600.0)
     if sid == 2:
-        return Scenario("S2", [(5.0,40.0),(5.0,60.0)], True)
-    if sid == 3:
-        return Scenario("S3", [(8.0,60.0),(2.0,0.0)], True)
-    if sid == 4:
-        return Scenario("S4", [(4.0,0.0),(6.0,60.0),(6.0,40.0),(6.0,60.0),(4.0,0.0),
-                               (6.0,60.0),(6.0,40.0),(6.0,60.0),(4.0,0.0)], False)
-    return get_scenario(1)
-
-# =========================
-# 날씨
-# =========================
-@dataclass
-class WeatherProfile:
-    name: str
-    params: carla.WeatherParameters
-
-def weather_heavy_rain_day() -> WeatherProfile:
-    return WeatherProfile(
-        name="heavy_rain_day",
-        params=carla.WeatherParameters(
+        heavy = carla.WeatherParameters(
             cloudiness=85.0, precipitation=90.0, precipitation_deposits=80.0,
             wetness=90.0, wind_intensity=0.4,
             sun_azimuth_angle=20.0, sun_altitude_angle=55.0,
             fog_density=8.0, fog_distance=0.0, fog_falloff=0.0
         )
-    )
+        return Scenario(2, "S2", [(9999.0, 60.0)], True, "straight",
+                        heavy, 60.0, 550.0, 600.0)
+    if sid == 3:
+        return Scenario(3, "S3", [(9999.0, 55.0)], True, "straight",
+                        getattr(carla.WeatherParameters, "WetNoon"),
+                        55.0, 550.0, 600.0, stop_zones=[200.0, 400.0])
+    return get_scenario(0, original_weather)
 
 # =========================
-# Pure Pursuit
+# 물리/환경
+# =========================
+def apply_tire_friction(vehicle: carla.Vehicle, tire_mu: float):
+    pc = vehicle.get_physics_control()
+    for w in pc.wheels:
+        w.tire_friction = tire_mu
+    vehicle.apply_physics_control(pc)
+
+# =========================
+# Pure Pursuit 경로
 # =========================
 def build_forward_path(amap: carla.Map, start_tf: carla.Transform,
                        max_length_m=2000.0, step_m=2.0):
-    wp = amap.get_waypoint(start_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+    wp = amap.get_waypoint(start_tf.location, project_to_road=True,
+                           lane_type=carla.LaneType.Driving)
     path=[wp]; total=0.0
     while total<max_length_m:
         nxt=path[-1].next(step_m)
@@ -138,7 +153,7 @@ def start_input_thread(cmd_q: "queue.Queue[str]"):
             s=sys.stdin.readline()
             if not s: continue
             s=s.strip()
-            if s in ("1","2","3","4","q","Q"): cmd_q.put(s)
+            if s in ("0","1","2","3","q","Q"): cmd_q.put(s)
     threading.Thread(target=_run, daemon=True).start()
 
 # =========================
@@ -159,7 +174,8 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2000)
-    ap.add_argument("--start_scenario", type=int, default=1)
+    ap.add_argument("--dry_mu", type=float, default=3.0)
+    ap.add_argument("--start_scenario", type=int, default=0)
     ap.add_argument("--pp_gain", type=float, default=1.6)
     ap.add_argument("--lookahead_min", type=float, default=8.0)
     ap.add_argument("--lookahead_max", type=float, default=15.0)
@@ -170,23 +186,28 @@ def main():
     original_weather=world.get_weather()
 
     lead=find_lead(world)
+    apply_tire_friction(lead, args.dry_mu)
+
     path=build_forward_path(amap, lead.get_transform())
     speed_pid=PID(0.60, 0.05, 0.02)
     steer_gain=args.pp_gain
     lookahead_min=args.lookahead_min; lookahead_max=args.lookahead_max
     idx_hint=0
 
-    sid=int(args.start_scenario); scenario=get_scenario(sid)
-    seg_i, seg_elapsed=0, 0.0
-    print(f"[SCENARIO] {scenario.name}  (1/2/3/4 전환, q 종료)")
+    sid=int(args.start_scenario); scenario=get_scenario(sid, original_weather)
+    world.set_weather(original_weather if scenario.weather is None else scenario.weather)
 
-    weather_switched=False
+    seg_i, seg_elapsed=0, 0.0
+    print(f"[SCENARIO] {scenario.name}  (0/1/2/3 전환, q 종료)")
+
     prev_kmh_cmd=scenario.pattern[0][1]
 
     KICK_DURATION=1.0; KICK_THROTTLE=0.55; kick_until_ts=0.0
     STUCK_SPEED_MS=0.5; STUCK_TIMEOUT=2.0
     EMERG_KICK_DURATION=1.2; emerg_kick_until_ts=0.0
     stuck_since=None
+
+    stop_state = {"active": False, "resume_ts": 0.0, "visited": set()}
 
     cmd_q: "queue.Queue[str]" = queue.Queue()
     start_input_thread(cmd_q)
@@ -203,46 +224,57 @@ def main():
             except queue.Empty: cmd=None
             if cmd in ("q","Q"): break
 
-            # 시나리오 전환 시 → lead는 새로 안 만들고 그대로 사용
-            if cmd in ("1","2","3","4"):
+            if cmd in ("0","1","2","3"):
                 speed_pid.reset(); idx_hint=0
-                sid=int(cmd); scenario=get_scenario(sid)
+                sid=int(cmd); scenario=get_scenario(sid, original_weather)
                 seg_i, seg_elapsed=0, 0.0
-                weather_switched=False
                 prev_kmh_cmd=scenario.pattern[0][1]
                 kick_until_ts=0.0; emerg_kick_until_ts=0.0; stuck_since=None
+                stop_state = {"active": False, "resume_ts": 0.0, "visited": set()}
+                world.set_weather(original_weather if scenario.weather is None else scenario.weather)
                 print(f"\n[SCENARIO] {scenario.name}")
                 continue
 
             tf_cur=lead.get_transform(); loc=tf_cur.location; yaw=tf_cur.rotation.yaw
             vv=lead.get_velocity(); speed=math.sqrt(vv.x*vv.x + vv.y*vv.y + vv.z*vv.z); speed_kmh=3.6*speed
             if idx_hint>len(path)-50: path=build_forward_path(amap, tf_cur); idx_hint=0
-            s_on_line=along_track_s_on_second_straight(loc)
+            s_on_line = track_frame.s_on_line(loc)
 
-            if (not weather_switched) and (s_on_line>=RAIN_SWITCH_S):
-                world.set_weather(weather_heavy_rain_day().params)
-                weather_switched=True
-                print("[WEATHER] +300m → Heavy Rain")
+            # stop_zones
+            if stop_state["active"]:
+                if now >= stop_state["resume_ts"]:
+                    stop_state["active"] = False
+                    speed_pid.reset()
+                else:
+                    lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
+                    continue
+            else:
+                for sz in scenario.stop_zones:
+                    if sz in stop_state["visited"]: continue
+                    if abs(s_on_line - sz) <= 5.0:
+                        print(f"[EVENT] Stop zone at {sz:.1f} m → full stop 5s")
+                        stop_state["visited"].add(sz)
+                        stop_state["active"] = True
+                        stop_state["resume_ts"] = now + 5.0
+                        lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
+                        speed_pid.reset()
+                        continue
 
-            if s_on_line >= STOP_S:
+            if s_on_line >= scenario.stop_s:
                 lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
                 speed_pid.reset()
-                print("vehice Stopped")
                 continue
 
             duration, kmh_cmd = scenario.pattern[seg_i]
             if seg_elapsed >= duration:
                 seg_i += 1; seg_elapsed = 0.0
                 if seg_i >= len(scenario.pattern):
-                    if scenario.loop: seg_i = 0
-                    else:
-                        if scenario.name=="S4" and s_on_line<DECEL_START_S: seg_i=0
-                        else: seg_i=len(scenario.pattern)-1
+                    seg_i = 0 if scenario.loop else len(scenario.pattern)-1
                 duration, kmh_cmd = scenario.pattern[seg_i]
             seg_elapsed += dt
 
-            if DECEL_START_S <= s_on_line < STOP_S:
-                v_allow = MAX_CRUISE_KMH * (STOP_S - s_on_line) / (STOP_S - DECEL_START_S)
+            if scenario.decel_start <= s_on_line < scenario.stop_s:
+                v_allow = MAX_CRUISE_KMH * (scenario.stop_s - s_on_line) / max((scenario.stop_s - scenario.decel_start), 1e-3)
                 kmh_cmd = min(kmh_cmd, v_allow)
 
             try:
@@ -302,4 +334,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
