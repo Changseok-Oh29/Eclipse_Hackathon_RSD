@@ -175,7 +175,12 @@ def reset_positions(world, amap, ego, lead, scenario: Scenario, sps: List[carla.
     if scenario.sid == 0:
         base_tf = sps[20]
     else:
-        base_tf = sps[53]
+        # 53번 인덱스 기준으로 200 m 뒤
+        tf53 = sps[53]
+        wp = amap.get_waypoint(tf53.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+        prevs = wp.previous(200.0)
+        base_wp = prevs[0] if prevs else wp
+        base_tf = base_wp.transform
 
     # ego 위치 리셋
     ego.set_simulate_physics(False)
