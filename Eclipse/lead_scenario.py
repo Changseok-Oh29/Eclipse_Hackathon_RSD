@@ -4,15 +4,16 @@
 lead_scenario.py — Pure Pursuit + 시나리오 속도제어 (env.py에서 만든 lead를 제어)
 
 요약:
-- 시나리오 0: 기존 루트(혼합), 기본 날씨, 목표속도 60 km/h
+- env.py에서 ego/lead 차량 스폰 → 이 파일은 lead 차량만 찾아와 제어
+- 시나리오 0: 혼합 경로, 기본 날씨, 목표속도 60 km/h
   · 감속 650 m → 정지 700 m
-- 시나리오 1~3: 두 번째 직선만 사용 (lead는 env.py에서 이미 스폰됨)
+- 시나리오 1~3: 두 번째 직선만 사용
   · S1: 기본 날씨, 60 km/h
   · S2: Heavy Rain, 60 km/h
-  · S3: WetNoon, 55 km/h + stop_zones(200 m, 400 m)에서 각각 5초 정지 후 재출발
+  · S3: WetNoon, 55 km/h + stop_zones(200, 400 m)에서 5초 정지
   · 감속 550 m → 정지 600 m
-- 리드 차량이 충돌 시 즉시 풀브레이크 정지 유지
-- 리드 차량 타이어 마찰계수 μ는 항상 dry 유지
+- 리드 차량 충돌 시 즉시 풀브레이크
+- 리드 차량 타이어 마찰계수 μ 항상 dry 유지
 - TM/Autopilot/agents 미사용, 키보드로 0/1/2/3 전환, q 종료
 """
 
@@ -56,7 +57,7 @@ track_frame = TrackFrame(DEFAULT_LINE_START, DEFAULT_LINE_END)
 MAX_CRUISE_KMH = 60.0
 
 # =========================
-# PID (속도 제어)
+# PID
 # =========================
 class PID:
     def __init__(self, kp, ki, kd, i_limit=2.0):
@@ -80,7 +81,6 @@ class Scenario:
     name: str
     pattern: List[Tuple[float, float]]
     loop: bool
-    route_type: str
     weather: Optional[carla.WeatherParameters]
     target_kmh: float
     decel_start: float
@@ -89,10 +89,10 @@ class Scenario:
 
 def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenario:
     if sid == 0:
-        return Scenario(0, "S0", [(9999.0, 60.0)], True, "mixed",
+        return Scenario(0, "S0", [(9999.0, 60.0)], True,
                         None, 60.0, 650.0, 700.0)
     if sid == 1:
-        return Scenario(1, "S1", [(9999.0, 60.0)], True, "straight",
+        return Scenario(1, "S1", [(9999.0, 60.0)], True,
                         None, 60.0, 550.0, 600.0)
     if sid == 2:
         heavy = carla.WeatherParameters(
@@ -101,16 +101,16 @@ def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenari
             sun_azimuth_angle=20.0, sun_altitude_angle=55.0,
             fog_density=8.0, fog_distance=0.0, fog_falloff=0.0
         )
-        return Scenario(2, "S2", [(9999.0, 60.0)], True, "straight",
+        return Scenario(2, "S2", [(9999.0, 60.0)], True,
                         heavy, 60.0, 550.0, 600.0)
     if sid == 3:
-        return Scenario(3, "S3", [(9999.0, 55.0)], True, "straight",
+        return Scenario(3, "S3", [(9999.0, 55.0)], True,
                         getattr(carla.WeatherParameters, "WetNoon"),
                         55.0, 550.0, 600.0, stop_zones=[200.0, 400.0])
     return get_scenario(0, original_weather)
 
 # =========================
-# 물리/환경
+# 물리
 # =========================
 def apply_tire_friction(vehicle: carla.Vehicle, tire_mu: float):
     pc = vehicle.get_physics_control()
@@ -119,7 +119,7 @@ def apply_tire_friction(vehicle: carla.Vehicle, tire_mu: float):
     vehicle.apply_physics_control(pc)
 
 # =========================
-# Pure Pursuit 경로
+# Pure Pursuit
 # =========================
 def build_forward_path(amap: carla.Map, start_tf: carla.Transform,
                        max_length_m=2000.0, step_m=2.0):
