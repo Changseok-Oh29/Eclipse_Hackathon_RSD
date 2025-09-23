@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-lead_scenario.py — Pure Pursuit + 시나리오 속도제어 (env.py에서 만든 lead를 제어)
+lead_scenario.py — Pure Pursuit + 시나리오 속도제어 (env.py에서 만든 ego/lead 제어)
 
 요약:
-- env.py에서 ego/lead 차량 스폰 → 이 파일은 lead 차량만 찾아와 제어
-- 시나리오 0: 혼합 경로, 기본 날씨, 목표속도 60 km/h
-  · 감속 650 m → 정지 700 m
-- 시나리오 1~3: 두 번째 직선만 사용
-  · S1: 기본 날씨, 60 km/h
-  · S2: Heavy Rain, 60 km/h
-  · S3: WetNoon, 55 km/h + stop_zones(200, 400 m)에서 5초 정지
-  · 감속 550 m → 정지 600 m
-- 리드 차량 충돌 시 즉시 풀브레이크
-- 리드 차량 타이어 마찰계수 μ 항상 dry 유지
-- TM/Autopilot/agents 미사용, 키보드로 0/1/2/3 전환, q 종료
+- env.py에서 ego/lead 차량 스폰 → 이 파일은 ego/lead를 찾아와 제어
+- 시나리오 0: ego=spawn idx 20, lead=앞쪽 30 m
+- 시나리오 1~3: ego=spawn idx 53, lead=앞쪽 30 m
+- 날씨는 시나리오별로 변경
+- 리드 차량 μ 항상 dry 유지
+- 키보드: 0/1/2/3 전환, q 종료
 """
 
 import sys, time, math, threading, queue
@@ -157,14 +152,45 @@ def start_input_thread(cmd_q: "queue.Queue[str]"):
     threading.Thread(target=_run, daemon=True).start()
 
 # =========================
-# Lead 찾기
+# 차량 찾기
 # =========================
+def find_ego(world: carla.World):
+    egos = [a for a in world.get_actors().filter("vehicle.*")
+            if a.attributes.get("role_name")=="ego"]
+    if not egos:
+        raise RuntimeError("No ego vehicle found. Run env.py first.")
+    return egos[0]
+
 def find_lead(world: carla.World):
     leads = [a for a in world.get_actors().filter("vehicle.*")
              if a.attributes.get("role_name")=="lead"]
     if not leads:
         raise RuntimeError("No lead vehicle found. Run env.py first.")
     return leads[0]
+
+# =========================
+# 위치 리셋
+# =========================
+def reset_positions(world, amap, ego, lead, scenario: Scenario, sps: List[carla.Transform]):
+    if scenario.sid == 0:
+        base_tf = sps[20]
+    else:
+        base_tf = sps[53]
+
+    # ego 위치 리셋
+    ego.set_simulate_physics(False)
+    ego.set_transform(base_tf)
+    ego.set_simulate_physics(True)
+
+    # lead = ego 앞쪽 30m
+    wp = amap.get_waypoint(base_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+    forward = wp.next(30.0)
+    if forward:
+        lead_tf = forward[0].transform
+        lead_tf.location.z = base_tf.location.z
+        lead.set_simulate_physics(False)
+        lead.set_transform(lead_tf)
+        lead.set_simulate_physics(True)
 
 # =========================
 # 메인
@@ -183,19 +209,21 @@ def main():
 
     client=carla.Client(args.host,args.port); client.set_timeout(10.0)
     world=client.get_world(); amap=world.get_map()
+    sps=amap.get_spawn_points()
     original_weather=world.get_weather()
 
-    lead=find_lead(world)
+    ego=find_ego(world); lead=find_lead(world)
     apply_tire_friction(lead, args.dry_mu)
+
+    sid=int(args.start_scenario); scenario=get_scenario(sid, original_weather)
+    reset_positions(world, amap, ego, lead, scenario, sps)
+    world.set_weather(original_weather if scenario.weather is None else scenario.weather)
 
     path=build_forward_path(amap, lead.get_transform())
     speed_pid=PID(0.60, 0.05, 0.02)
     steer_gain=args.pp_gain
     lookahead_min=args.lookahead_min; lookahead_max=args.lookahead_max
     idx_hint=0
-
-    sid=int(args.start_scenario); scenario=get_scenario(sid, original_weather)
-    world.set_weather(original_weather if scenario.weather is None else scenario.weather)
 
     seg_i, seg_elapsed=0, 0.0
     print(f"[SCENARIO] {scenario.name}  (0/1/2/3 전환, q 종료)")
@@ -206,7 +234,6 @@ def main():
     STUCK_SPEED_MS=0.5; STUCK_TIMEOUT=2.0
     EMERG_KICK_DURATION=1.2; emerg_kick_until_ts=0.0
     stuck_since=None
-
     stop_state = {"active": False, "resume_ts": 0.0, "visited": set()}
 
     cmd_q: "queue.Queue[str]" = queue.Queue()
@@ -227,6 +254,7 @@ def main():
             if cmd in ("0","1","2","3"):
                 speed_pid.reset(); idx_hint=0
                 sid=int(cmd); scenario=get_scenario(sid, original_weather)
+                reset_positions(world, amap, ego, lead, scenario, sps)
                 seg_i, seg_elapsed=0, 0.0
                 prev_kmh_cmd=scenario.pattern[0][1]
                 kick_until_ts=0.0; emerg_kick_until_ts=0.0; stuck_since=None
@@ -235,6 +263,7 @@ def main():
                 print(f"\n[SCENARIO] {scenario.name}")
                 continue
 
+            # ===== 제어 루프 (lead) =====
             tf_cur=lead.get_transform(); loc=tf_cur.location; yaw=tf_cur.rotation.yaw
             vv=lead.get_velocity(); speed=math.sqrt(vv.x*vv.x + vv.y*vv.y + vv.z*vv.z); speed_kmh=3.6*speed
             if idx_hint>len(path)-50: path=build_forward_path(amap, tf_cur); idx_hint=0
@@ -260,11 +289,13 @@ def main():
                         speed_pid.reset()
                         continue
 
+            # 최종 정지
             if s_on_line >= scenario.stop_s:
                 lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
                 speed_pid.reset()
                 continue
 
+            # 목표 속도
             duration, kmh_cmd = scenario.pattern[seg_i]
             if seg_elapsed >= duration:
                 seg_i += 1; seg_elapsed = 0.0
@@ -287,6 +318,7 @@ def main():
                     elif yaw_diff > 12: kmh_cmd = min(kmh_cmd, 40.0)
             except: pass
 
+            # Pure Pursuit 조향
             lookahead = clamp(lookahead_min + (lookahead_max - lookahead_min)*(speed_kmh/80.0),
                               lookahead_min, lookahead_max)
             idx_hint, tf_tgt = find_lookahead_target(path, loc, lookahead, idx_hint)
@@ -297,6 +329,7 @@ def main():
             Ld = max(3.0, lookahead)
             steer = clamp(steer_gain * (2.0 * y_left) / (Ld*Ld), -1.0, 1.0)
 
+            # 속도 제어
             v_ref = kmh_cmd / 3.6
             a_cmd = speed_pid.step(v_ref - speed, dt)
             throttle=0.0; brake=0.0
