@@ -3,7 +3,6 @@ import numpy as np
 import cv2
 import zenoh
 from kuksa_client.grpc import VSSClient, Datapoint
-# Wayland에서 OpenCV 창을 띄울 때 권장
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 from common.LK_algo import (
