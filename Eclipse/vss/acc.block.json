@@ -45,6 +45,19 @@
                 "description": "Estimated lead vehicle speed"
               }
             }
+          },
+          "LK": {
+            "type": "branch",
+            "description": "Lane keeping for ego vehicle",
+            "children": {
+              "Steering": {
+                "type": "sensor",
+                "datatype": "float",
+                "min": -1.0,
+                "max": 1.0,
+                "description": "Steering command, -1.0=full left, 0=center, 1.0=full right"
+              }
+            }
           }
         }
       }
