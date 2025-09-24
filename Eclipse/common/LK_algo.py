@@ -26,6 +26,9 @@ def x_at_y_(line: Tuple[int, int, int, int], y: int) -> int:
     t = (y - y1) / float(y2 - y1)
     return int(round(x1 + t * (x2 - x1)))
 
+def seg_len(x1: int, y1: int, x2: int, y2: int) -> float:
+    return math.hypot(x2 - x1, y2 - y1)
+
 def lane_mid_x(left_line: Tuple[int,int,int,int],
                right_line: Tuple[int,int,int,int],
                y: int) -> Tuple[int,int,int]:
@@ -65,10 +68,10 @@ def detect_lanes_and_center(
 
     if roi_vertices is None:
         roi_vertices = np.array([[
-            (int(0.05 * w), h),
-            (int(0.38 * w), int(0.6 * h)),
-            (int(0.62 * w), int(0.6 * h)),
-            (int(0.95 * w), h),
+            (int(0.00 * w), h),
+            (int(0.3 * w), int(0.62 * h)),
+            (int(0.7 * w), int(0.62 * h)),
+            (int(1.00 * w), h),
         ]], dtype=np.int32)
 
     mask = np.zeros_like(edges)
@@ -90,7 +93,11 @@ def detect_lanes_and_center(
         for (x1, y1, x2, y2) in lines[:, 0, :]:
             if x2 == x1:
                 continue
+            if seg_len(x1,y1,x2,y2) < 30:            # 30px 미만 제거
+                continue
             m = (y2 - y1) / float(x2 - x1)
+            if abs(m) < 0.45 or abs(m) > 2.5:       # 너무 완만/가파른 선 제거 (~25°~68° 유지)
+                continue
             b = y1 - m * x1
             if m < 0 and x1 < w*0.5 and x2 < w*0.5:
                 left_params.append((m, b))

@@ -94,8 +94,8 @@ def main():
     ap.add_argument("--canny_high", type=int, default=180)
     ap.add_argument("--hough_thresh", type=int, default=40)
     ap.add_argument("--hough_min_len", type=int, default=20)
-    ap.add_argument("--hough_max_gap", type=int, default=120)
-    ap.add_argument("--lane_mem_ttl", type=int, default=60)
+    ap.add_argument("--hough_max_gap", type=int, default=60)
+    ap.add_argument("--lane_mem_ttl", type=int, default=90)
     ap.add_argument("--anchor_speed_kmh", type=float, default=50.0)
 
     # 시각화 관련 파라미터

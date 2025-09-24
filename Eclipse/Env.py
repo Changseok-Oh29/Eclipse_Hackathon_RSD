@@ -1,6 +1,5 @@
 import os, sys, time, json, math, argparse
 from typing import Optional
-
 import numpy as np
 import cv2
 import carla
@@ -203,7 +202,6 @@ def main():
             time.sleep(0.005)  # CPU 여유
     except KeyboardInterrupt:
         print("\n[STOP] Ctrl+C received, cleaning up...")
-
     # ----------- 종료 로직 ------------
     finally:
         try:
