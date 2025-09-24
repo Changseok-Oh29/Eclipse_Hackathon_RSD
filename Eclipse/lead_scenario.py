@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-lead_scenario.py — env.py가 스폰한 ego/lead를 찾아 제어 (lead_check.py 안정 로직 준용)
+lead_scenario.py — env.py가 스폰한 ego/lead를 찾아 제어 (안정 주행 개편판)
 
-시나리오:
-- S0: ego=spawn idx 20, lead=앞 30m, 60 km/h, 커브 감속, 650→700 선형 감속 후 정지
-- S1: ego=53 기준 250m 뒤(z+1m), lead=앞 30m(z+1m), 60 km/h, 700→750 선형 감속 후 정지
-- S2: S1 + HeavyRain
-- S3: S1 + WetNoon, 55 km/h, stop_zones=[200m, 400m]에서
-      -4 m/s² 시간기반 감속(v=v0-4t)→ 0 km/h → 5초 정지 → 출발 킥으로 재출발
+핵심 변경
+- Pure Pursuit → Stanley 컨트롤러(차선 중심 고정)
+- 동일 차선 경로(road_id/lane_id 고정) 생성
+- 조향 속도 제한 + 저역통과로 핸들 진동 억제
+- 곡률 기반 추가 감속
 
 키: 0/1/2/3 전환, q 종료
 """
@@ -39,7 +38,7 @@ def teleport(v: carla.Vehicle, tf: carla.Transform):
     v.set_simulate_physics(True)
 
 # =========================
-# s-프레임 정의
+# s-프레임 정의 (정지구간 계산용)
 # =========================
 class TrackFrame:
     def __init__(self, start: carla.Location, end: carla.Location):
@@ -74,7 +73,7 @@ def update_track_frame_for_straight(amap: carla.Map, start_tf: carla.Transform, 
     track_frame.set_line(start_tf.location, cur.transform.location)
 
 # =========================
-# PID (lead_check 튜닝 준용)
+# PID (가감속용)
 # =========================
 class PID:
     def __init__(self, kp, ki, kd, i_limit=2.0):
@@ -90,29 +89,101 @@ class PID:
         return self.kp*e + self.ki*self.i + self.kd*d
 
 # =========================
-# Pure Pursuit (lead_check 구조)
+# 동일-차선 경로 생성 + 최근접/전방 포인트
 # =========================
-def build_forward_path(amap: carla.Map, start_tf: carla.Transform,
-                       max_length_m=2000.0, step_m=2.0):
-    wp = amap.get_waypoint(start_tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
-    path=[wp]; total=0.0
-    while total<max_length_m:
-        nxt=path[-1].next(step_m)
-        if not nxt: break
-        path.append(nxt[0]); total+=step_m
+def build_same_lane_path(amap: carla.Map, start_wp: carla.Waypoint,
+                         max_length_m=2000.0, step_m=2.0):
+    """start_wp의 road_id/lane_id를 유지하며 앞으로 진행하는 경로"""
+    road_id = start_wp.road_id
+    lane_id = start_wp.lane_id
+    path=[start_wp]; total=0.0; cur=start_wp
+    while total < max_length_m:
+        nxts = cur.next(step_m)
+        if not nxts: break
+        nxt = nxts[0]
+        # 동일 차선 유지: 분기/교차로에서도 lane/road 고정(가능한 한)
+        if (nxt.road_id != road_id) or (nxt.lane_id != lane_id):
+            # 같은 road로 이어지지 않으면 가장 가까운 동일-차선 후보 탐색
+            cand = [w for w in nxts if (w.road_id==road_id and w.lane_id==lane_id)]
+            if cand:
+                nxt = cand[0]
+            else:
+                # 동일 차선 불가 → 현재 차선의 다음으로 계속 (차선변경 최소화)
+                pass
+        path.append(nxt)
+        total += step_m
+        cur = nxt
     return path
 
-def find_lookahead_target(path, cur_loc, lookahead_m, start_idx):
-    i=clamp(start_idx,0,len(path)-1)
-    best_i=i; best_d2=1e18
-    for k in range(max(0,i-20), min(len(path),i+21)):
-        d2=path[k].transform.location.distance(cur_loc)**2
-        if d2<best_d2: best_d2=d2; best_i=k
-    acc=0.0; idx=best_i; target_tf=path[idx].transform
-    while idx<len(path)-1 and acc<lookahead_m:
-        a=path[idx].transform.location; b=path[idx+1].transform.location
-        acc+=a.distance(b); idx+=1; target_tf=path[idx].transform
-    return idx, target_tf
+def nearest_index_on_path(path, loc, hint=0, search_window=40):
+    i = clamp(hint, 0, len(path)-1)
+    lo = max(0, i - search_window)
+    hi = min(len(path)-1, i + search_window)
+    best_i = i; best_d2 = 1e18
+    for k in range(lo, hi+1):
+        p = path[k].transform.location
+        d2 = (p.x-loc.x)**2 + (p.y-loc.y)**2
+        if d2 < best_d2: best_d2=d2; best_i=k
+    return best_i
+
+# =========================
+# Stanley 조향
+# =========================
+class StanleyController:
+    def __init__(self, k_e=0.7, k_soft=1.0, steer_rate=1.5, alpha=0.25):
+        """
+        k_e: 횡오차 게인
+        k_soft: 저속 안정화용 소프트닝
+        steer_rate: 스티어링 속도 제한(단위: 1.0/초)
+        alpha: 1차 저역통과 필터 계수(0~1, 높을수록 부드러움)
+        """
+        self.k_e = k_e
+        self.k_soft = k_soft
+        self.steer_rate = steer_rate
+        self.alpha = alpha
+        self.prev_steer = 0.0
+        self.inited = False
+
+    def reset(self):
+        self.prev_steer = 0.0
+        self.inited = False
+
+    def step(self, path, idx, loc: carla.Location, yaw_deg: float, speed: float, dt: float):
+        # 경로의 기준(현재 인덱스)과 그 법선/접선
+        idx = clamp(idx, 0, len(path)-2)
+        wp_a = path[idx].transform
+        wp_b = path[idx+1].transform
+
+        # 경로 heading
+        hx, hy = (wp_b.location.x - wp_a.location.x), (wp_b.location.y - wp_a.location.y)
+        hd = math.degrees(math.atan2(hy, hx))
+        heading_err = deg_wrap180(hd - yaw_deg)
+        heading_err_rad = math.radians(heading_err)
+
+        # 횡오차(왼쪽 +)
+        dx, dy = (loc.x - wp_a.location.x), (loc.y - wp_a.location.y)
+        path_yaw = math.atan2(hy, hx)
+        cross_track = -math.sin(path_yaw)*dx + math.cos(path_yaw)*dy  # 좌측(+)
+
+        # Stanley 공식
+        steer_cmd = heading_err_rad + math.atan2(self.k_e * cross_track, self.k_soft + speed)
+
+        # 조향 속도 제한
+        max_step = self.steer_rate * dt
+        steer_cmd = clamp(steer_cmd, -1.2, 1.2)  # 여유 범위
+        # 저역통과 + rate limit
+        if not self.inited:
+            smoothed = steer_cmd
+            self.inited = True
+        else:
+            # 1차 LPF
+            smoothed = (1.0 - self.alpha) * steer_cmd + self.alpha * self.prev_steer
+            # rate limit
+            delta = clamp(smoothed - self.prev_steer, -max_step, max_step)
+            smoothed = self.prev_steer + delta
+
+        self.prev_steer = smoothed
+        return float(clamp(smoothed, -1.0, 1.0))
 
 # =========================
 # 시나리오
@@ -209,10 +280,8 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2000)
     ap.add_argument("--start_scenario", type=int, default=0)
-    # lead_check에 가까운 보수적 기본값
-    ap.add_argument("--pp_gain", type=float, default=1.0)
-    ap.add_argument("--lookahead_min", type=float, default=12.0)
-    ap.add_argument("--lookahead_max", type=float, default=25.0)
+    # 속도/경로 튜닝
+    ap.add_argument("--lookahead_for_curv", type=float, default=25.0)
     args=ap.parse_args()
 
     client=carla.Client(args.host,args.port); client.set_timeout(10.0)
@@ -236,9 +305,13 @@ def main():
     reset_positions(world, amap, ego, lead, scenario, sps)
     world.set_weather(original_weather if scenario.weather is None else scenario.weather)
 
-    # 경로/제어
-    path=build_forward_path(amap, lead.get_transform())
+    # === 경로: 동일-차선 경로로 생성 ===
+    start_wp = amap.get_waypoint(lead.get_transform().location, project_to_road=True, lane_type=carla.LaneType.Driving)
+    path = build_same_lane_path(amap, start_wp, max_length_m=2000.0, step_m=2.0)
+
+    # === 제어기 ===
     speed_pid=PID(0.60, 0.05, 0.02)
+    stanley = StanleyController(k_e=0.8, k_soft=1.2, steer_rate=1.8, alpha=0.35)
     idx_hint=0
 
     print(f"[SCENARIO] {scenario.name}  (0/1/2/3 전환, q 종료)")
@@ -273,12 +346,15 @@ def main():
                 try: collision_sensor.destroy()
                 except: pass
 
-                speed_pid.reset(); idx_hint=0
+                speed_pid.reset(); stanley.reset(); idx_hint=0
                 collided["hit"]=False
                 sid=int(cmd); scenario=get_scenario(sid, original_weather)
                 reset_positions(world, amap, ego, lead, scenario, sps)
                 world.set_weather(original_weather if scenario.weather is None else scenario.weather)
-                path=build_forward_path(amap, lead.get_transform())
+
+                # 경로 재생성(동일 차선)
+                start_wp = amap.get_waypoint(lead.get_transform().location, project_to_road=True, lane_type=carla.LaneType.Driving)
+                path = build_same_lane_path(amap, start_wp, max_length_m=2000.0, step_m=2.0)
 
                 collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=lead)
                 collision_sensor.listen(on_collision)
@@ -297,8 +373,14 @@ def main():
             # 상태
             tf = lead.get_transform(); loc=tf.location; yaw=tf.rotation.yaw
             v = lead.get_velocity(); speed=math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z); speed_kmh=3.6*speed
-            if idx_hint>len(path)-50:
-                path=build_forward_path(amap, tf); idx_hint=0
+
+            # 경로 끝 근처면 연장
+            if idx_hint>len(path)-80:
+                start_wp = amap.get_waypoint(tf.location, project_to_road=True, lane_type=carla.LaneType.Driving)
+                path = build_same_lane_path(amap, start_wp, max_length_m=2000.0, step_m=2.0)
+                idx_hint = 0
+
+            # s좌표
             s = track_frame.s_on_line(loc)
 
             # 기본 목표속도
@@ -307,7 +389,7 @@ def main():
             # 최종 정지
             if s >= scenario.stop_s:
                 lead.apply_control(carla.VehicleControl(throttle=0.0, steer=0.0, brake=1.0))
-                speed_pid.reset()
+                speed_pid.reset(); stanley.reset()
                 continue
 
             # S3: stop zones 처리(-4 m/s² 감속 → 5초 정지 → 출발 킥)
@@ -339,28 +421,21 @@ def main():
                 v_allow = MAX_CRUISE_KMH * (scenario.stop_s - s) / max((scenario.stop_s - scenario.decel_start), 1e-3)
                 kmh_cmd = min(kmh_cmd, v_allow)
 
-            # 커브 감속(S0에서만)
-            if scenario.sid == 0:
-                try:
-                    wp_now = amap.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-                    nxt = wp_now.next(25.0)
-                    if nxt:
-                        yaw_next = nxt[0].transform.rotation.yaw
-                        yaw_diff = abs(deg_wrap180(yaw_next - wp_now.transform.rotation.yaw))
-                        if yaw_diff > 25: kmh_cmd = min(kmh_cmd, 30.0)
-                        elif yaw_diff > 12: kmh_cmd = min(kmh_cmd, 40.0)
-                except: pass
+            # 곡률 기반 추가 감속(모든 시나리오 보호용)
+            try:
+                wp_now = amap.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+                nxt = wp_now.next(15.0)
+                if nxt:
+                    yaw_next = nxt[0].transform.rotation.yaw
+                    yaw_diff = abs(deg_wrap180(yaw_next - wp_now.transform.rotation.yaw))
+                    if yaw_diff > 30: kmh_cmd = min(kmh_cmd, 28.0)
+                    elif yaw_diff > 18: kmh_cmd = min(kmh_cmd, 38.0)
+                    elif yaw_diff > 12: kmh_cmd = min(kmh_cmd, 45.0)
+            except: pass
 
-            # Pure Pursuit (보수적)
-            lookahead = clamp(12.0 + (25.0-12.0)*(speed_kmh/80.0), 12.0, 25.0)
-            idx_hint, tf_tgt = find_lookahead_target(path, loc, lookahead, idx_hint)
-            tgt = tf_tgt.location
-            dx,dy = tgt.x - loc.x, tgt.y - loc.y
-            yaw_rad = math.radians(yaw); fx,fy = math.cos(yaw_rad), math.sin(yaw_rad)
-            y_left = -dx*fy + dy*fx
-            Ld = max(3.0, lookahead)
-            pp_gain = 1.0  # lead_check 스타일
-            steer = clamp(pp_gain * (2.0 * y_left) / (Ld*Ld), -1.0, 1.0)
+            # === 경로 상 최근접 인덱스 & Stanley 조향 ===
+            idx_hint = nearest_index_on_path(path, loc, hint=idx_hint, search_window=50)
+            steer = StanleyController.step(stanley, path, idx_hint, loc, yaw, speed, dt)
 
             # 속도 제어 + 보호
             v_ref = kmh_cmd / 3.6
@@ -370,7 +445,7 @@ def main():
             # 오버스피드 즉시 제동
             if speed_kmh > kmh_cmd + 5.0:
                 throttle = 0.0
-                brake = max(brake, 0.3)
+                brake = max(brake, 0.35)
 
             # 출발/스턱 보조 (S3 감속/정지 중에는 킥 비활성)
             allow_kick = (scenario.sid != 3) or (sz["phase"] == "none")
@@ -391,7 +466,7 @@ def main():
                 if kmh_cmd <= 0.1:
                     throttle=0.0; brake=1.0; speed_pid.reset()
                 else:
-                    if a_cmd >= 0: throttle = clamp(a_cmd, 0.0, 0.7)  # 상한 0.7
+                    if a_cmd >= 0: throttle = clamp(a_cmd, 0.0, 0.65)  # 상한 약간 보수적
                     else: brake = clamp(-a_cmd, 0.0, 1.0)
 
             lead.apply_control(carla.VehicleControl(throttle=float(throttle),
