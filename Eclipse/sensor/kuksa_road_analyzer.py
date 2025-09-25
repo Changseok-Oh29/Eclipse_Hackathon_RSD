@@ -80,27 +80,55 @@ def compute_metrics(bgr, roi_box):
     roi = bgr[y0:y1, x0:x1]
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     H,S,V = cv2.split(hsv)
-    Sn = S.astype(np.float32)/255.0; Vn = V.astype(np.float32)/255.0
-    highlight = (Vn>0.85)&(Sn<0.20)
-    SRI=float(highlight.mean())
+    Sn = S.astype(np.float32)/255.0
+    Vn = V.astype(np.float32)/255.0
+
+    # === 반짝임 조건 완화 ===
+    highlight = (Vn > 0.70) & (Sn < 0.35)
+    SRI = float(highlight.mean())
+
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    LV=float(cv2.Laplacian(gray, cv2.CV_64F).var())
-    ED=float((cv2.Canny(gray,80,160)>0).mean())
-    DR=float((gray<50).mean())
-    S_mean=float(Sn.mean()); V_mean=float(Vn.mean())
-    return dict(SRI=SRI,LV=LV,ED=ED,DR=DR,S_mean=S_mean,V_mean=V_mean)
+    LV = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    ED = float((cv2.Canny(gray,80,160) > 0).mean())
+    DR = float((gray < 50).mean())
+    S_mean = float(Sn.mean())
+    V_mean = float(Vn.mean())
+    return dict(SRI=SRI, LV=LV, ED=ED, DR=DR, S_mean=S_mean, V_mean=V_mean)
 
 def classify(m):
     import numpy as np
-    if m['SRI']>TH_SRI_ICY and m['S_mean']<TH_S_MEAN_I and m['V_mean']>TH_V_MEAN_I: st='icy'
-    elif m['SRI']>TH_SRI_WET and m['LV']<TH_LV_WET: st='wet'
-    elif m['DR']>TH_DR_SNOW and m['S_mean']<TH_S_MEAN_S: st='snow'
-    else: st='dry'
-    conf=0.5
-    if st=='wet': conf=min(1.0,0.5+max(0,(m['SRI']-TH_SRI_WET)*6)+max(0,(TH_LV_WET-m['LV'])/100))
-    elif st=='icy': conf=min(1.0,0.5+max(0,(m['SRI']-TH_SRI_ICY)*5)+max(0,(TH_S_MEAN_I-m['S_mean'])*2)+max(0,(m['V_mean']-TH_V_MEAN_I)*1.5))
-    elif st=='snow': conf=min(1.0,0.5+max(0,(m['DR']-TH_DR_SNOW)*1.5)+max(0,(TH_S_MEAN_S-m['S_mean'])*1.5))
-    else: conf=min(1.0,0.5+max(0,(m['LV']-70)/120)+max(0,(TH_SRI_WET-m['SRI'])*4))
+    if m['SRI'] > TH_SRI_ICY and m['S_mean'] < TH_S_MEAN_I and m['V_mean'] > TH_V_MEAN_I:
+        st = 'icy'
+
+    # === wet 조건 완화 ===
+    elif (m['SRI'] > TH_SRI_WET) or (m['LV'] < TH_LV_WET*1.5 and m['V_mean'] > 0.5):
+        st = 'wet'
+
+    elif m['DR'] > TH_DR_SNOW and m['S_mean'] < TH_S_MEAN_S:
+        st = 'snow'
+    else:
+        st = 'dry'
+
+    # --- confidence ---
+    if st == 'wet':
+        conf = min(1.0, 0.6
+                        + max(0,(m['SRI']-TH_SRI_WET)*6)      # SRI 기반
+                        + max(0,(TH_LV_WET-m['LV'])/200)      # LV 기반
+                        + max(0,(m['V_mean']-0.5)*1.0))       # 밝기 기반
+    elif st == 'icy':
+        conf = min(1.0, 0.5
+                        + max(0,(m['SRI']-TH_SRI_ICY)*5)
+                        + max(0,(TH_S_MEAN_I-m['S_mean'])*2)
+                        + max(0,(m['V_mean']-TH_V_MEAN_I)*1.5))
+    elif st == 'snow':
+        conf = min(1.0, 0.5
+                        + max(0,(m['DR']-TH_DR_SNOW)*1.5)
+                        + max(0,(TH_S_MEAN_S-m['S_mean'])*1.5))
+    else:
+        conf = min(1.0, 0.5
+                        + max(0,(m['LV']-70)/120)
+                        + max(0,(TH_SRI_WET-m['SRI'])*4))
+
     return st, float(np.clip(conf,0.0,1.0))
 
 def overlay(bgr, m, roi_box, st, conf):
@@ -231,7 +259,7 @@ def main():
                 # 새 추론 건너뛰어도 매 프레임 Ts는 게시 (직전 결과 재사용)
                 publish_cam_vss(sim_ts)
 
-            # ---- 요청 포맷 로깅: 한 줄에 이어 붙이기 ----
+            # ---- 요청 포맷 로깅 ----
             use_state = (st if do_infer and st is not None else _last_state)
             use_conf  = (cf if do_infer and cf is not None else _last_conf)
             use_sri   = (_last_sri if _last_sri is not None else 0.0)
@@ -245,7 +273,6 @@ def main():
             frame_cnt += 1
 
         except Exception:
-            # 에러는 줄바꿈 후 출력해 흐름 유지
             sys.stdout.write("\n")
             sys.stdout.flush()
             print("[Analyzer] callback error:")
@@ -264,3 +291,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
