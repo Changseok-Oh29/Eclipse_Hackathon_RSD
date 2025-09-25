@@ -231,7 +231,7 @@ def main():
                 )
 
                 ##################수정 필요###################
-                y_anchor = int(lookahead_ratio(args.anchor_speed_kmh) * h)
+                y_anchor = int(lookahead_ratio(speed_of(ego)) * h)
                 ##############################################
                 x_cam_mid = w // 2
                 v_kmh = 0

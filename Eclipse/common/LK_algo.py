@@ -182,9 +182,11 @@ def gains_for_speed(v_mps: float):
     v = v_mps * 3.6
     # v = v_mps
     if v <= 25:
-        return 0.0030, 0.15
-    elif v <= 50:
+        # return 0.0030, 0.15
         return 0.0020, 0.13
+    elif v <= 50:
+        # return 0.0020, 0.13
+        return 0.0010, 0.10
     else:
         return 0.0010, 0.10
 

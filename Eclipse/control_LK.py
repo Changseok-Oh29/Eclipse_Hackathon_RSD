@@ -150,13 +150,6 @@ def main():
             else:
                 steer_out = steer_raw
 
-            # 옵션 EMA(프레임 기준)
-            if steer_ema is not None:
-                steer_ema = args.steer_alpha * steer_raw + (1.0 - args.steer_alpha) * steer_ema
-                steer_out = clamp(steer_ema, -1.0, 1.0)
-            else:
-                steer_out = steer_raw
-
             # --- 추가 ---
             decay = 0.0
             if args.i_decay_tau > 1e-6:
@@ -176,7 +169,7 @@ def main():
             # 5) 적용 (한 틱당 정확히 1회)
             ego.apply_control(carla.VehicleControl(
                 throttle=float(throttle),
-                steer=float(steer_cmd),
+                steer=float(steer_out),
                 brake=0.0
             ))
 
