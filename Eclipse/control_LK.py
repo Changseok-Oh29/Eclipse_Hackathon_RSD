@@ -53,15 +53,20 @@ def main():
     ap.add_argument("--ema_alpha_speed", type=float, default=0.2)
     ap.add_argument("--ema_alpha_thr", type=float, default=0.25)
 
-    # 조향(KUKSA)
+    # 조향
     ap.add_argument("--kuksa_host", default="127.0.0.1")
     ap.add_argument("--kuksa_port", type=int, default=55555)
     ap.add_argument("--steer_key", default="Vehicle.ADAS.LK.Steering")
-    ap.add_argument("--steer_alpha", type=float, default=0.2, help="0이면 필터 미사용")
-    ap.add_argument("--deadband", type=float, default=0.04,
+    ap.add_argument("--steer_alpha", type=float, default=0.4, help="0이면 필터 미사용")
+    ap.add_argument("--deadband", type=float, default=0.03,
                 help="조향 deadband (normed steer 절댓값이 이 값보다 작으면 0으로 처리)")
+    # ---- 추가 ----
+    ap.add_argument("--ki_steer", type=float, default=0.02, help="조향 적분 게인(작게!)")
+    ap.add_argument("--i_clip", type=float, default=0.20, help="조향 적분 한계(anti-windup)")
+    ap.add_argument("--i_decay_tau", type=float, default=2.0, help="중심 근처에서 적분 감쇠 시간상수[s]")
+
     # 페이싱(수면) 옵션
-    ap.add_argument("--extra_sleep_ratio", type=float, default=0.0,
+    ap.add_argument("--extra_sleep_ratio", type=float, default=0.12,
                     help="0~0.3 권장: dt에서 처리시간을 뺀 뒤 추가로 ratio*dt만큼 더 잠(시각적 안정성↑)")
 
     args = ap.parse_args()
@@ -114,6 +119,7 @@ def main():
     ema_thr = 0.0
     steer_ema = None if args.steer_alpha <= 0.0 else 0.0
     last_log = time.time()
+    i_state = 0.0  # 적분 상태(초기 0)
 
     print(f"[RUN] sync+sleep | target_v≈{args.target_speed_kmh:.1f} km/h | steer key='{args.steer_key}'")
 
@@ -130,10 +136,10 @@ def main():
             # 3) 스로틀 P + EMA
             throttle = 0.5
 
-            # 4) 조향: dict → Datapoint.value 가정(너의 환경 기준)
+            # 4) 조향: dict → Datapoint.value 가정
             resp = kuksa.get_current_values([args.steer_key])
             steer_raw = float(resp[args.steer_key].value)
-            steer_raw = clamp(steer_raw, -1.0, 1.0)
+            # steer_raw = clamp(steer_raw, -1.0, 1.0)
             if abs(steer_raw) < args.deadband:
                 steer_raw = 0.0
 
@@ -151,10 +157,26 @@ def main():
             else:
                 steer_out = steer_raw
 
+            # --- 추가 ---
+            decay = 0.0
+            if args.i_decay_tau > 1e-6:
+                # 작은 명령에서는 감쇠 강하게, 큰 명령에서는 거의 감쇠 안 함
+                # (|steer_out|이 0이면 e^-0=1 → 감쇠 빠름, 0.3이면 e^-(0.3/τ))
+                decay = math.exp(-abs(steer_out) / max(args.i_decay_tau, 1e-6))
+
+            # 적분 업데이트: 중심 근처일수록 i_state를 자연감쇠, 그 외엔 누적
+            i_state = i_state * decay + args.ki_steer * steer_raw * dt
+
+            # anti-windup
+            i_state = clamp(i_state, -args.i_clip, args.i_clip)
+
+            # 최종 명령: P(=steer_out) + I
+            steer_cmd = clamp(steer_out + i_state, -1.0, 1.0)
+
             # 5) 적용 (한 틱당 정확히 1회)
             ego.apply_control(carla.VehicleControl(
                 throttle=float(throttle),
-                steer=float(steer_out),
+                steer=float(steer_cmd),
                 brake=0.0
             ))
 

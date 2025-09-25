@@ -2,6 +2,8 @@ import os, time, json, argparse
 import numpy as np
 import cv2
 import zenoh
+import carla
+from typing import Any, Optional
 from kuksa_client.grpc import VSSClient, Datapoint
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
@@ -9,11 +11,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 # =============================================================
 from common.LK_algo import (
     detect_lanes_and_center, fuse_lanes_with_memory,
-    lane_mid_x, lookahead_ratio, gains_for_speed
+    lane_mid_x, lookahead_ratio, gains_for_speed, speed_of
 )
 from common.acc_algo import ACCController, ACCInputs
 # =============================================================
 
+# --- Carla 환경 구축 ---
+# ============================================================
+client = carla.Client("127.0.0.1", 2000)
+client.set_timeout(5.0)
+world: carla.World = client.get_world()
+settings = world.get_settings()
+print(f"[WORLD] connected. sync={settings.synchronous_mode}, fixed_dt={settings.fixed_delta_seconds}")
+# ============================================================
 
 # --- Zenoh 환경 구축 ---
 # =============================================================
@@ -63,6 +73,12 @@ def parse_attachment(att: bytes) -> dict:
 
 def bgra_to_bgr(buf: memoryview, w: int, h: int) -> np.ndarray:
     return np.frombuffer(buf, np.uint8).reshape((h, w, 4))[:, :, :3].copy()
+
+def find_actor_by_role(world: carla.World, role_name: str) -> Optional[carla.Actor]:
+    for actor in world.get_actors().filter("*vehicle*"):
+        if actor.attributes.get("role_name") == role_name:
+            return actor
+    return None
 # ===================================================================
 
 
@@ -103,6 +119,9 @@ def main():
     ap.add_argument("--print", type=int, default=1)     # 로그 on/off
     args = ap.parse_args()
     dt = 1.0 / max(1, args.fps)
+
+    # -------------------- Carla 연결 -----------------------
+    ego = find_actor_by_role(world, "ego")
 
     # -------------------- KUKSA 연결 -----------------------
     kuksa = VSSClient(args.kuksa_host, args.kuksa_port)
@@ -215,6 +234,7 @@ def main():
                 y_anchor = int(lookahead_ratio(args.anchor_speed_kmh) * h)
                 ##############################################
                 x_cam_mid = w // 2
+                v_kmh = 0
 
                 x_lane_mid = lane_mem.get("center_x")
                 if used_left and used_right:
@@ -224,7 +244,7 @@ def main():
                 st = 0.0
                 if x_lane_mid is not None:
                     offset_px = (x_lane_mid - x_cam_mid)   # +: 우측으로 치우침
-                    v_kmh = 0.0
+                    v_kmh = speed_of(ego) * 3.6
                     kp, st_clip = gains_for_speed(v_kmh / 3.6)  # 함수는 m/s 입력, 여기선 0
                     st = float(max(-st_clip, min(st_clip, kp * offset_px)))  # 좌:-, 우:+ 방향 유지
                 else:
@@ -232,17 +252,10 @@ def main():
 
                 # KUKSA 이용하여 steering Publish
                 publish_steer(kuksa, st)             
-
-                ############## 변수 구독 필요
-                v_kmh = 0
-                thr = 0
-                brk = 0
-                # st = 0
-                ###############
                 
                 # 로그 표시
                 if args.print:
-                    print(f"v={v_kmh:5.1f} km/h  thr={thr:.2f} brk={brk:.2f} str={st:+.2f}")
+                    print(f"v={v_kmh:5.1f} km/h  str={st:+.2f}")
 
                 # 시각화
                 if args.display:
@@ -269,7 +282,7 @@ def main():
                         cv2.line(vis, (x_lane_mid, 0), (x_lane_mid, h - 1), (0, 0, 255), 2, cv2.LINE_AA)
                     cv2.line(vis, (0, y_anchor), (w - 1, y_anchor), (0, 255, 0), 1, cv2.LINE_AA)
 
-                    cv2.putText(vis, f"v={v_kmh:5.1f} km/h  thr={thr:.2f} brk={brk:.2f} str={st:+.2f}",
+                    cv2.putText(vis, f"v={v_kmh:5.1f} km/h  str={st:+.2f}",
                                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2, cv2.LINE_AA)
 
                     cv2.imshow("LK_decision", vis)

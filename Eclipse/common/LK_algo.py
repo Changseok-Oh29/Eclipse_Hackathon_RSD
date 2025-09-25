@@ -180,6 +180,7 @@ def fuse_lanes_with_memory(lanes: Dict, frame_id: int, mem: Dict, ttl_frames: in
 def gains_for_speed(v_mps: float):
     """Return (kp, clip) based on speed in m/s (converted to km/h)."""
     v = v_mps * 3.6
+    # v = v_mps
     if v <= 25:
         return 0.0030, 0.15
     elif v <= 50:
@@ -193,8 +194,8 @@ def lookahead_ratio(v_kmh: float) -> float:
       0.90 @<=25 → 0.80 @50 → 0.70 @75 → 0.67 @>=100
     """
     if v_kmh <= 25.0:
-        return 0.93
-        # return 0.7
+        # return 0.93
+        return 0.7
     if v_kmh <= 50.0:
         t = (v_kmh - 25.0) / (50.0 - 25.0)
         return 0.93*(1.0 - t) + 0.88*t
