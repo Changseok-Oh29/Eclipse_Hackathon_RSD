@@ -169,20 +169,17 @@ class Scenario:
 
 def get_scenario(sid: int, original_weather: carla.WeatherParameters) -> Scenario:
     if sid == 0:
-        return Scenario(0, "S0", "mixed", None, 60.0, 650.0, 700.0, [])
+        return Scenario(0, "S0", "mixed", carla.WeatherParameters.ClearSunset,
+                        60.0, 650.0, 700.0, []) # ClearSunset = Dry
     if sid == 1:
-        return Scenario(1, "S1", "straight", None, 60.0, 550.0, 600.0, [])
+        return Scenario(1, "S1", "straight", carla.WeatherParameters.ClearSunset,
+                        60.0, 550.0, 600.0, []) # ClearSunset = Dry
     if sid == 2:
-        heavy = carla.WeatherParameters(
-            cloudiness=85.0, precipitation=90.0, precipitation_deposits=80.0,
-            wetness=90.0, wind_intensity=0.4,
-            sun_azimuth_angle=20.0, sun_altitude_angle=55.0,
-            fog_density=8.0, fog_distance=0.0, fog_falloff=0.0
-        )
-        return Scenario(2, "S2", "straight", heavy, 60.0, 550.0, 600.0, [])
+        return Scenario(2, "S2", "straight", carla.WeatherParameters.HardRainSunset,
+                        60.0, 550.0, 600.0, []) # HardRainSunset = Wet
     if sid == 3:
-        return Scenario(3, "S3", "straight", getattr(carla.WeatherParameters,"WetNoon"),
-                        55.0, 550.0, 600.0, [200.0, 400.0])
+        return Scenario(3, "S3", "straight", carla.WeatherParameters.WetNoon,
+                        55.0, 550.0, 600.0, [200.0, 400.0]) # WetNoon = Icy
     return get_scenario(0, original_weather)
 
 # =========================
@@ -329,8 +326,8 @@ def main():
             v=lead.get_velocity(); speed=math.sqrt(v.x*v.x+v.y*v.y+v.z*v.z); speed_kmh=3.6*speed
             s=track_frame.s_on_line(loc)
 
-            # 2초마다 속도 출력
-            if now - last_print >= 2.0:
+            # 1초마다 속도 출력
+            if now - last_print >= 1.0:
                 print(f"[INFO] Speed = {speed_kmh:.1f} km/h, s = {s:.1f} m")
                 last_print = now
 
