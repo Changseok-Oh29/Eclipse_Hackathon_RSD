@@ -74,7 +74,8 @@ def main():
     # ------------------------
     # Zenoh pub/sub 설정
     # ------------------------
-    z = zenoh.open({})
+    cfg = zenoh.Config()
+    z = zenoh.open(cfg)
     q_lk = Queue(maxsize=200)
     def _on_lk(s):
         try:

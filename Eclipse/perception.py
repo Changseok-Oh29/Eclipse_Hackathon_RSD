@@ -286,7 +286,8 @@ def main():
             vw_vis = _open_writer(f"{root}_vis{ext}", args.fps, args.width, args.height)
     
     # Zenoh (original topics) + GO latch
-    z = zenoh.open({})
+    cfg = zenoh.Config()
+    z = zenoh.open(cfg)
     pub_lk_feat = z.declare_publisher('demo/lk/features')
     pub_jpg     = z.declare_publisher('demo/lk/frame') if args.pub_jpeg else None
     pub_acc_feat= z.declare_publisher('demo/acc/features')

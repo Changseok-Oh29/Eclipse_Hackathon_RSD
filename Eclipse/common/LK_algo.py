@@ -194,6 +194,7 @@ def lookahead_ratio(v_kmh: float) -> float:
     """
     if v_kmh <= 25.0:
         return 0.93
+        # return 0.7
     if v_kmh <= 50.0:
         t = (v_kmh - 25.0) / (50.0 - 25.0)
         return 0.93*(1.0 - t) + 0.88*t

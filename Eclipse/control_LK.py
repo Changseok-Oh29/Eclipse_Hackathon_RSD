@@ -37,7 +37,7 @@ def find_actor_by_role(world: carla.World, role_name: str) -> Optional[carla.Act
 
 # ---------- Main ----------
 def main():
-    # --- Argparse (decision_LK 스타일로 main 안에) ---
+    # --- Argparse ---
     ap = argparse.ArgumentParser("control_LK (sync + sleep pacing)")
     # CARLA / TM
     ap.add_argument("--carla_host", default="127.0.0.1")
@@ -48,7 +48,7 @@ def main():
     ap.add_argument("--log_every", type=float, default=0.5)
 
     # 스로틀(P) + EMA
-    ap.add_argument("--target_speed_kmh", type=float, default=25.0)
+    ap.add_argument("--target_speed_kmh", type=float, default=50.0)
     ap.add_argument("--kp_throttle", type=float, default=0.05)
     ap.add_argument("--ema_alpha_speed", type=float, default=0.2)
     ap.add_argument("--ema_alpha_thr", type=float, default=0.25)
@@ -128,7 +128,7 @@ def main():
             v_now = speed_of(ego)
 
             # 3) 스로틀 P + EMA
-            throttle = 0.4
+            throttle = 0.5
 
             # 4) 조향: dict → Datapoint.value 가정(너의 환경 기준)
             resp = kuksa.get_current_values([args.steer_key])

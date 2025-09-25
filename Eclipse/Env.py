@@ -38,7 +38,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=2000)
-    ap.add_argument('--fps',  type=int, default=20)
+    ap.add_argument('--fps',  type=int, default=40)
     ap.add_argument('--spawn_idx', type=int, default=328)
     ap.add_argument('--width', type=int, default=640)
     ap.add_argument('--height', type=int, default=480)
@@ -58,7 +58,10 @@ def main():
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = dt
-    settings.substepping = False
+    settings.substepping = True
+    settings.max_substep_delta_time = 0.005  # 5 ms
+    settings.max_substeps = 10               # 최대 10 서브스텝 (최대 200 Hz 내부 물리)
+
     world.apply_settings(settings)
     print(f"[WORLD] synchronous_mode=True, delta_seconds={dt:.3f}")
 
