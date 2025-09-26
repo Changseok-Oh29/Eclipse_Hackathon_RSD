@@ -42,13 +42,10 @@ push하실 때 어떤 부분 수정하셨는지 description 자세하게 설명 
 
 ## Terminal 2 (현재는 비활) -> kuksa 실행
 
-cd ~/Eclipse_Hackathon_RSD/Eclipse/sensor  # 파일 경로 진입
-
-docker run -it --rm \   # 도커 실행 
-  -p 55555:55555 \
-  -v $(pwd)/myvss.json:/app/vss.json \
-  ghcr.io/eclipse/kuksa.val/databroker:latest \
-  --vss /app/vss.json
+docker run -it --rm --net=host \
+  -v "$HOME/myvss.json":/data/myvss.json \
+  ghcr.io/eclipse-kuksa/kuksa-databroker:latest \
+  --vss /data/myvss.json --insecure --enable-databroker-v1
 
 
         
