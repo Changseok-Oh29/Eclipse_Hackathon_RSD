@@ -98,9 +98,8 @@ def main():
     port = tm.get_port()
 
     lead.set_autopilot(True, port)
-
     # ★ 여기에 원하는 절대 속도(km/h) 지정
-    tm.set_desired_speed(lead, 18.0)  # 예: 18 km/h
+    tm.set_desired_speed(lead, 5.0)  # 예: 18 km/h
 
     try:
         tm.set_synchronous_mode(True)  # 월드가 sync일 때 의미 있음

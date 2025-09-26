@@ -52,7 +52,11 @@ def main():
     ap.add_argument('--record_mode', choices=['raw','vis','both'], default='vis')
     args = ap.parse_args()
 
-
+    # --- Kuksa 연결 ---
+    kuksa = VSSClient(args.host, args.kuksa_port)
+    kuksa.connect()
+    print(f"[KUKSA] Connected to {args.host}:{args.kuksa_port}")
+    
     # --- CARLA 연결 ---
     client = carla.Client(args.host, args.port)
     client.set_timeout(5.0)
@@ -159,6 +163,7 @@ def main():
 
 
     # --- 레이더 → Kuksa(VSS) ---
+    # ==================================================================
     last_pub_ts = 0.0
     min_period  = dt  # 레이더 tick과 맞춤(20Hz)
 
@@ -177,10 +182,9 @@ def main():
             last_pub_ts = now
             return
 
-        best = min(meas, key=lambda d: d.depth)  # 가장 가까운 물체
-        distance = float(best.depth)             # m
-        ## CARLA vel: + 멀어짐 / - 접근 → 접근=+ 로 변환
-        rel_speed_acc = float(-best.velocity)
+        best = min(meas, key=lambda d: d.depth) # 가장 가까운 detection만 선택 (예: 최소 depth)
+        distance = float(best.depth)      # m
+        rel_speed_acc = float(-best.velocity)  # m/s (CARLA convention: +면 멀어짐, -면 접근)
 
         ## ego 속도 → lead 추정 (간단한 예: ego 속도 계측 후 rel 이용)
         v = ego.get_velocity()
@@ -209,7 +213,10 @@ def main():
         last_pub_ts = now
         print(f"[RADAR] d={distance:.1f} rel={rel_speed_acc:+.1f} ttc={ttc:.1f} v_lead≈{lead_speed_est:.1f}")
 
+
     radar.listen(on_radar)
+    # ==================================================================
+
 
     # 창 생성 
     if args.display:
@@ -219,7 +226,8 @@ def main():
     latest_front = {'bgr': None}
     print("[RUN] Streaming... (Ctrl+C to stop)")
 
-    # ---- 메인 로직 루프 ---
+
+    # --- 메인 로직 루프 ---
     try:
         last_status = time.time()
         while True:
