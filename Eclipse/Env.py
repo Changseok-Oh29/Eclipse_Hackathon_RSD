@@ -22,18 +22,6 @@ pub  = sess.declare_publisher('carla/cam/front')
 # ========================================================
 
 
-# --- KUKSA 환경 구축 ---
-# ========================================================
-class VSS:
-    ROOT = "Vehicle.ADAS.ACC"
-    Distance     = f"{ROOT}.Distance"
-    RelSpeed     = f"{ROOT}.RelSpeed"
-    TTC          = f"{ROOT}.TTC"
-    HasTarget    = f"{ROOT}.HasTarget"
-    LeadSpeedEst = f"{ROOT}.LeadSpeedEst"
-# ========================================================
-
-
 # --- 기본 파라미터/ 함수 ---
 # =======================================================
 IMG_W        = int(os.environ.get("IMG_W", "640"))
@@ -79,6 +67,12 @@ def main():
     settings.max_substeps = 10               # 최대 10 서브스텝 (최대 200 Hz 내부 물리)
     world.apply_settings(settings)
     print(f"[WORLD] synchronous_mode=True, delta_seconds={dt:.3f}")
+
+
+    # --- Kuksa 연결 ---
+    kuksa = VSSClient(args.host, args.kuksa_port)
+    kuksa.connect()
+    print(f"[KUKSA] Connected to {args.host}:{args.kuksa_port}")
 
 
     # --- 차량 스폰 ---
@@ -169,28 +163,51 @@ def main():
     min_period  = dt  # 레이더 tick과 맞춤(20Hz)
 
     def on_radar(meas: carla.RadarMeasurement):
-        nonlocal last_pub_ts
-        now = time.time()
-        if now - last_pub_ts < min_period:
-            return  # rate limit
+        # nonlocal last_pub_ts
+        # now = time.time()
+        # if now - last_pub_ts < min_period:
+        #     return  # rate limit
 
         if len(meas) == 0:
             # 타깃 없음
             updates = {
-                VSS.HasTarget: Datapoint(False),
+                "Vehicle.ADAS.ACC.HasTarget": Datapoint(False),
             }
-            kc.set_current_values(updates)
+            kuksa.set_current_values(updates)
             last_pub_ts = now
             return
 
-        # 가장 가까운 detection만 선택 (예: 최소 depth)
-        best = min(meas, key=lambda d: d.depth)
+        best = min(meas, key=lambda d: d.depth)  # 가장 가까운 물체
+        distance = float(best.depth)             # m
+        ## CARLA vel: + 멀어짐 / - 접근 → 접근=+ 로 변환
+        rel_speed_acc = float(-best.velocity)
 
-        distance = float(best.depth)      # m
-        rel_speed = float(best.velocity)  # m/s (CARLA convention: +면 멀어짐, -면 접근)
+        ## ego 속도 → lead 추정 (간단한 예: ego 속도 계측 후 rel 이용)
+        v = ego.get_velocity()
+        ego_speed = math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z)  # m/s
+        lead_speed_est = clamp(ego_speed - rel_speed_acc, 0.0, 100.0)
 
-        # KUKSA 제거: publish 생략, 로그만 유지
-        print(f"[RADAR] dist={distance:.1f}/ m rel_speed={rel_speed:+.1f}m/s")
+        ## TTC (접근일 때만 유한)
+        if rel_speed_acc > 0.0:
+            ttc = max(0.1, distance / rel_speed_acc)
+        else:
+            ttc = float('inf')
+
+        ## 클램프/정규화
+        distance = clamp(distance, 0.0, 500.0)
+        rel_speed_acc = clamp(rel_speed_acc, -100.0, 100.0)
+        ttc = (9999.9 if not math.isfinite(ttc) else clamp(ttc, 0.0, 1e4))
+
+        updates = {
+            "Vehicle.ADAS.ACC.Distance":     Datapoint(distance),
+            "Vehicle.ADAS.ACC.RelSpeed":     Datapoint(rel_speed_acc),
+            "Vehicle.ADAS.ACC.TTC":          Datapoint(ttc),
+            "Vehicle.ADAS.ACC.HasTarget":    Datapoint(True),
+            "Vehicle.ADAS.ACC.LeadSpeedEst": Datapoint(lead_speed_est),
+        }
+        kuksa.set_current_values(updates)   # ★ 센서는 current에 기록
+        last_pub_ts = now
+        print(f"[RADAR] d={distance:.1f} rel={rel_speed_acc:+.1f} ttc={ttc:.1f} v_lead≈{lead_speed_est:.1f}")
 
     radar.listen(on_radar)
 
@@ -202,7 +219,7 @@ def main():
     latest_front = {'bgr': None}
     print("[RUN] Streaming... (Ctrl+C to stop)")
 
-    # ---------------------- 메인 로직 루프 -----------------------------
+    # ---- 메인 로직 루프 ---
     try:
         last_status = time.time()
         while True:
