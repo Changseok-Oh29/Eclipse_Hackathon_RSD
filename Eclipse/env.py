@@ -121,16 +121,17 @@ class DynPusher:
         odo_v_mean = v_abs
 
         updates = {
-            "Vehicle.Private.Dyn.Ts":          Datapoint(float(sim_ts)),
-            "Vehicle.Private.Dyn.v":           Datapoint(float(v_abs)),
-            "Vehicle.Private.Dyn.vx":          Datapoint(float(vx_b)),
-            "Vehicle.Private.Dyn.vy":          Datapoint(float(vy_b)),
-            "Vehicle.Private.Dyn.ax":          Datapoint(float(ax)),
-            "Vehicle.Private.Dyn.ay":          Datapoint(float(ay)),
-            "Vehicle.Private.Dyn.yaw_rate":    Datapoint(float(yaw_rate)),
-            "Vehicle.Private.Dyn.odo_v_mean":  Datapoint(float(odo_v_mean)),
-            "Vehicle.Speed":                   Datapoint(float(v_abs * 3.6)),  # km/h
-        }
+    "Vehicle.Private.Slip.Ts":                     Datapoint(float(sim_ts)),
+    "Vehicle.Private.Slip.Metrics.v":              Datapoint(float(v_abs)),
+    "Vehicle.Private.Slip.Metrics.vx":             Datapoint(float(vx_b)),
+    "Vehicle.Private.Slip.Metrics.vy":             Datapoint(float(vy_b)),
+    "Vehicle.Private.Slip.Metrics.ax_mean":        Datapoint(float(ax)),
+    "Vehicle.Private.Slip.Metrics.ay_abs_mean":    Datapoint(float(ay)),
+    "Vehicle.Private.Slip.Metrics.long_residual":  Datapoint(float(yaw_rate)),   # 임시 매핑
+    "Vehicle.Private.Slip.Metrics.wheel_odo_v_mean": Datapoint(float(odo_v_mean)),
+
+}
+
         self.cli.set_current_values(updates)
 
 # =========================
