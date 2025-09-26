@@ -41,7 +41,7 @@ def publish_steer(kuksa: VSSClient, st):
     st = float(_last_steer if st is None else st)
     _last_steer = st
     # actuator지만, 컨트롤이 current를 읽는 경우도 있어서 current에 씀 (필요시 target으로 변경 가능)
-    kuksa.set_current_values({"Vehicle.ADAS.LK.Steering": Datapoint(st)})
+    kuksa.set_target_values({"Vehicle.ADAS.LK.Steering": Datapoint(st)})
 
 # ================= LK 유틸 =================
 DEF_TOPIC_CAM = "carla/cam/front"
@@ -94,7 +94,7 @@ def write_acc_actuators(kc: VSSClient, thr: float, brk: float, mode: str):
     thr = float(max(0.0, min(1.0, thr)))
     brk = float(max(0.0, min(1.0, brk)))
 
-    kc.set_current_values({
+    kc.set_target_values({
         ACC_THR_PATH:  Datapoint(thr),
         ACC_BRK_PATH:  Datapoint(brk),
         ACC_MODE_PATH: Datapoint(mode),

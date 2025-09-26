@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
+
 # ---- ACC 파라미터 (decision.py에서 가져옴) ----
 TARGET_SPEED_KPH             = 80.0
 TARGET_SPEED_MPS             = TARGET_SPEED_KPH / 3.6
@@ -153,7 +154,7 @@ class ACCController:
             # 크루즈 부스트
             if (not target_ready):
                 speed_gap = max(0.0, TARGET_SPEED_MPS - ego_speed_mps)
-                boost = np.clip(0.12 + 0.06 * speed_gap, 0.12, 0.60)
+                boost = np.clip(0.20 + 0.10 * speed_gap, 0.20, 0.80)
                 throttle_des = max(throttle_des, float(boost))
                 brake_des = 0.0
 

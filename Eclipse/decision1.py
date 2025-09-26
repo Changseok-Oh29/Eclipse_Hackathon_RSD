@@ -37,7 +37,7 @@ def wait_for_ego(world, role: str, timeout_sec: float = 20.0):
         if v is not None:
             return v
         v = find_vehicle_from_camera_parent(world)
-        if v is not None:
+        if v is not None:g
             return v
         time.sleep(0.25)
     return None
