@@ -1,0 +1,51 @@
+desiredState:
+  apiVersion: v0.1
+  workloads:
+
+    zenoh:
+      agent: agent_A
+      tags: []
+      dependencies: {}
+      restartPolicy: ALWAYS
+      runtime: podman
+      runtimeConfig: |
+        image: docker.io/eclipse/zenoh:1.5.1
+        commandOptions:
+          - --network
+          - host
+          # zenoh.json5를 쓰는 경우에만 아래 -v 유지, 아니면 이 4줄 제거
+          - -v
+          - /home/yg/Eclipse_Hackathon_RSD/Eclipse/sensor/zenoh.json5:/cfg/zenoh.json5:ro
+        commandArgs:
+          - -l
+          - tcp/0.0.0.0:7447
+          - --config
+          - /cfg/zenoh.json5
+      configs: {}
+      files: []
+
+    kuksa:
+      agent: agent_A
+      tags: []
+      dependencies: {}
+      restartPolicy: ALWAYS
+      runtime: podman
+      runtimeConfig: |
+        image: ghcr.io/eclipse-kuksa/kuksa-databroker:0.4.6
+        commandOptions:
+          - --network
+          - host
+          - -v
+          - /home/yg/Eclipse_Hackathon_RSD/Eclipse/sensor/myvss.json:/data/myvss.json:ro
+        commandArgs:
+          - --address
+          - 0.0.0.0
+          - --port
+          - "55555"
+          - --insecure
+          - --vss
+          - /data/myvss.json
+      configs: {}
+      files: []
+
+

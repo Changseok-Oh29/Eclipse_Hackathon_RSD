@@ -1,0 +1,170 @@
+desiredState:
+  apiVersion: v0.1
+  workloads:
+
+    zenoh:
+      agent: agent_A
+      tags: []
+      dependencies: {}
+      restartPolicy: ALWAYS
+      runtime: podman
+      runtimeConfig: |
+        image: docker.io/eclipse/zenoh:1.5.1
+        commandOptions:
+          - --network
+          - host
+          # zenoh.json5를 쓰는 경우에만 아래 -v 유지, 아니면 이 4줄 제거
+          - -v
+          - /home/yg/Eclipse_Hackathon_RSD/Eclipse/sensor/zenoh.json5:/cfg/zenoh.json5:ro
+        commandArgs:
+          - -l
+          - tcp/0.0.0.0:7447
+          - --config
+          - /cfg/zenoh.json5
+      configs: {}
+      files: []
+
+    kuksa:
+      agent: agent_A
+      tags: []
+      dependencies: {}
+      restartPolicy: ALWAYS
+      runtime: podman
+      runtimeConfig: |
+        image: ghcr.io/eclipse-kuksa/kuksa-databroker:0.4.6
+        commandOptions:
+          - --network
+          - host
+          - -v
+          - /home/yg/Eclipse_Hackathon_RSD/Eclipse/sensor/myvss.json:/data/myvss.json:ro
+        commandArgs:
+          - --address
+          - 0.0.0.0
+          - --port
+          - "55555"
+          - --insecure
+          - --vss
+          - /data/myvss.json
+      configs: {}
+      files: []
+
+    road:
+      agent: agent_A
+      tags: []
+      dependencies: { kuksa: ADD_COND_RUNNING, zenoh: ADD_COND_RUNNING }
+      restartPolicy: ALWAYS
+      runtime: podman
+      runtimeConfig: |
+        image: python:3.10-slim
+        commandOptions:
+          - --network
+          - host
+          - -v
+          - /home/yg/Eclipse_Hackathon_RSD:/app:ro
+          - -e
+          - KUKSA_HOST=127.0.0.1
+          - -e
+          - KUKSA_PORT=55555
+          - -e
+          - IN_KEY=carla/cam/front
+          - -e
+          - CAM_DT=0.05
+          - -e
+          - FRAME_INTERVAL=1
+          - -e
+          - FORCE_QUANTIZE=1
+          - -e
+          - EMA_A=0.3
+          - -e
+          - LINE_WRAP=8
+          - -e
+          - ZENOH_ENDPOINT=tcp/127.0.0.1:7447
+          - -e
+          - PYTHONUNBUFFERED=1
+        commandArgs:
+          - sh
+          - -lc
+          - |
+            export PIP_NO_CACHE_DIR=1 PIP_DEFAULT_TIMEOUT=120 ;
+            python -m ensurepip --upgrade || true ;
+            python -m pip install --no-cache-dir --root-user-action=ignore \
+              'kuksa-client>=0.4.0' 'protobuf<5' numpy opencv-python-headless eclipse-zenoh ;
+            python -u /app/Eclipse/sensor/kuksa_road_analyzer.py
+      configs: {}
+      files: []
+
+    slip:
+      agent: agent_A
+      tags: []
+      dependencies: { kuksa: ADD_COND_RUNNING }
+      restartPolicy: ALWAYS
+      runtime: podman
+      runtimeConfig: |
+        image: python:3.10-slim
+        commandOptions:
+          - --network
+          - host
+          - -v
+          - /home/yg/Eclipse_Hackathon_RSD:/app:ro
+          - -e
+          - KUKSA_HOST=127.0.0.1
+          - -e
+          - KUKSA_PORT=55555
+          - -e
+          - PYTHONUNBUFFERED=1
+        commandArgs:
+          - sh
+          - -lc
+          - |
+            export PIP_NO_CACHE_DIR=1 PIP_DEFAULT_TIMEOUT=120 ;
+            python -m ensurepip --upgrade || true ;
+            python -m pip install --no-cache-dir --root-user-action=ignore \
+              'kuksa-client>=0.4.0' 'protobuf<5' numpy ;
+            python -u /app/Eclipse/sensor/kuksa_slip_estimator.py \
+              --kuksa-host 127.0.0.1 --kuksa-port 55555 \
+              --rate 20 --win 15 --thr2acc 1.2 --brk2dec 4.5 \
+              --evt_thr 0.2 --min_v_for_quality 5.0
+      configs: {}
+      files: []
+
+    fuser:
+      agent: agent_A
+      tags: []
+      dependencies: { kuksa: ADD_COND_RUNNING }
+      restartPolicy: ALWAYS
+      runtime: podman
+      runtimeConfig: |
+        image: python:3.10-slim
+        commandOptions:
+          - --network
+          - host
+          - -v
+          - /home/yg/Eclipse_Hackathon_RSD:/app:ro
+          - -e
+          - KUKSA_HOST=127.0.0.1
+          - -e
+          - KUKSA_PORT=55555
+          - -e
+          - POLL_DT=0.05
+          - -e
+          - FUSE_LATENCY=0.50
+          - -e
+          - PRINT_EVERY=1.0
+          - -e
+          - FORWARD_ONLY=1
+          - -e
+          - VERBOSE=1
+          - -e
+          - PYTHONUNBUFFERED=1
+        commandArgs:
+          - sh
+          - -lc
+          - |
+            export PIP_NO_CACHE_DIR=1 PIP_DEFAULT_TIMEOUT=120 ;
+            python -m ensurepip --upgrade || true ;
+            python -m pip install --no-cache-dir --root-user-action=ignore \
+              'kuksa-client>=0.4.0' 'protobuf<5' numpy ;
+            python -u /app/Eclipse/sensor/kuksa_state_fuser.py
+      configs: {}
+      files: []
+
