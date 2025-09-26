@@ -1,0 +1,100 @@
+{
+  "Vehicle": {
+    "type": "branch",
+    "description": "Root of VSS",
+    "children": {
+      "ADAS": {
+        "type": "branch",
+        "description": "Advanced Driver Assistance Systems",
+        "children": {
+          "ACC": {
+            "type": "branch",
+            "description": "ACC inputs and control outputs",
+            "children": {
+              "Distance": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m",
+                "min": 0.0,
+                "max": 500.0,
+                "description": "Distance to lead vehicle"
+              },
+              "RelSpeed": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "description": "Closing rate (+ means approaching)"
+              },
+              "TTC": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "s",
+                "description": "Time-to-collision (infinite if opening)"
+              },
+              "HasTarget": {
+                "type": "sensor",
+                "datatype": "boolean",
+                "description": "Whether a valid radar target is tracked"
+              },
+              "LeadSpeedEst": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "min": 0.0,
+                "max": 100.0,
+                "description": "Estimated lead vehicle speed"
+              },
+              "Ctrl": {
+                "type": "branch",
+                "description": "ACC control outputs",
+                "children": {
+                  "Throttle": {
+                    "type": "actuator",
+                    "datatype": "float",
+                    "unit": "ratio",
+                    "min": 0.0,
+                    "max": 1.0,
+                    "description": "Throttle command (0..1)"
+                  },
+                  "Brake": {
+                    "type": "actuator",
+                    "datatype": "float",
+                    "unit": "ratio",
+                    "min": 0.0,
+                    "max": 1.0,
+                    "description": "Brake command (0..1)"
+                  },
+                  "Steer": {
+                    "type": "actuator",
+                    "datatype": "float",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "description": "Steering command for ACC pipeline (-1.0..1.0)"
+                  },
+                  "Mode": {
+                    "type": "actuator",
+                    "datatype": "string",
+                    "description": "ACC mode/state label"
+                  }
+                }
+              }
+            }
+          },
+          "LK": {
+            "type": "branch",
+            "description": "Lane keeping for ego vehicle",
+            "children": {
+              "Steering": {
+                "type": "actuator",
+                "datatype": "float",
+                "min": -1.0,
+                "max": 1.0,
+                "description": "Steering command, -1.0=full left, 0=center, 1.0=full right"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
