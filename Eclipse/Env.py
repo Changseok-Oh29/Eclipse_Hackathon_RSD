@@ -4,6 +4,7 @@ import numpy as np
 import cv2
 import carla
 import zenoh
+from kuksa_client.grpc import VSSClient, Datapoint
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 # --- Zenoh 환경 구축 ---
@@ -21,23 +22,38 @@ pub  = sess.declare_publisher('carla/cam/front')
 # ========================================================
 
 
-# --- 기본 파라미터 ---
+# --- KUKSA 환경 구축 ---
+# ========================================================
+class VSS:
+    ROOT = "Vehicle.ADAS.ACC"
+    Distance     = f"{ROOT}.Distance"
+    RelSpeed     = f"{ROOT}.RelSpeed"
+    TTC          = f"{ROOT}.TTC"
+    HasTarget    = f"{ROOT}.HasTarget"
+    LeadSpeedEst = f"{ROOT}.LeadSpeedEst"
+# ========================================================
+
+
+# --- 기본 파라미터/ 함수 ---
 # =======================================================
 IMG_W        = int(os.environ.get("IMG_W", "640"))
 IMG_H        = int(os.environ.get("IMG_H", "480"))
 SENSOR_TICK  = float(os.environ.get("SENSOR_TICK", "0.05"))   # 20Hz
 LEAD_GAP_M   = float(os.environ.get("LEAD_GAP_M", "30.0"))
 STATUS_EVERY = float(os.environ.get("STATUS_EVERY", "5.0"))
+
+def clamp(x, lo, hi): return max(lo, min(hi, x))
 # ========================================================
 
 
 # --- main 문 ---
 # ========================================================
 def main():
-    # ------------------- Argparse 인자 파싱 ----------------------------
+    # --- Argparse 인자 파싱 ---
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=2000)
+    ap.add_argument('--kuksa_port', type=int, default=55555)
     ap.add_argument('--fps',  type=int, default=40)
     ap.add_argument('--spawn_idx', type=int, default=328)
     ap.add_argument('--width', type=int, default=640)
@@ -48,35 +64,34 @@ def main():
     ap.add_argument('--record_mode', choices=['raw','vis','both'], default='vis')
     args = ap.parse_args()
 
-    # ---------------- CARLA 연결 ----------------
+
+    # --- CARLA 연결 ---
     client = carla.Client(args.host, args.port)
     client.set_timeout(5.0)
     world = client.get_world()
     dt = 1.0 / max(1, args.fps)
     original_settings = world.get_settings()
-
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = dt
     settings.substepping = True
     settings.max_substep_delta_time = 0.005  # 5 ms
     settings.max_substeps = 10               # 최대 10 서브스텝 (최대 200 Hz 내부 물리)
-
     world.apply_settings(settings)
     print(f"[WORLD] synchronous_mode=True, delta_seconds={dt:.3f}")
 
-    # ---------------- 차량 스폰 ----------------
+
+    # --- 차량 스폰 ---
     bp = world.get_blueprint_library()
-    # ego
+    ## ego
     ego_bp = (bp.filter('vehicle.*model3*') or bp.filter('vehicle.*'))[0]
     ego_bp.set_attribute('role_name', 'ego')
     sps = world.get_map().get_spawn_points()
     tf  = sps[min(max(0, args.spawn_idx), len(sps)-1)]
     ego = world.try_spawn_actor(ego_bp, tf)
-    if ego is None:
-        raise RuntimeError("Failed to spawn Ego. Try another spawn_idx or free the spawn point.")
-
-    # lead (TM 없이 스폰만 하고 정지 유지)
+    if ego is None: raise RuntimeError("Failed to spawn Ego. Try another spawn_idx or free the spawn point.")
+    
+    ## lead (TM 없이 스폰만 하고 정지 유지)
     lead_bp = (bp.filter('vehicle.audi.tt') or bp.filter('vehicle.*'))[0]
     lead_bp.set_attribute('role_name', 'lead')
     ego_wp = world.get_map().get_waypoint(tf.location)
@@ -84,11 +99,29 @@ def main():
     lead_tf = lead_wp.transform
     lead_tf.location.z = tf.location.z
     lead = world.try_spawn_actor(lead_bp, lead_tf)
-    if lead is None:
-        raise RuntimeError("Failed to spawn Lead. Try another spawn_idx or free the spawn point.")
+    if lead is None: raise RuntimeError("Failed to spawn Lead. Try another spawn_idx or free the spawn point.")
 
-    # ---------------- 센서 부착 ----------------
-    # chase camera(레이더용 버드 뷰)
+
+    # --- 센서 부착 ---
+    ## 전방 카메라
+    cam_bp = bp.find('sensor.camera.rgb')
+    cam_bp.set_attribute('image_size_x', str(args.width))
+    cam_bp.set_attribute('image_size_y', str(args.height))
+    cam_bp.set_attribute('fov', str(args.fov))
+    cam_bp.set_attribute('sensor_tick', str(dt))
+    cam_tf = carla.Transform(carla.Location(x=1.2, z=1.4))
+    cam    = world.spawn_actor(cam_bp, cam_tf, attach_to=ego)
+    
+    ## 레이더
+    radar_bp = bp.find('sensor.other.radar')
+    radar_bp.set_attribute('range', '120')
+    radar_bp.set_attribute('horizontal_fov', '20')
+    radar_bp.set_attribute('vertical_fov', '10')
+    radar_bp.set_attribute('sensor_tick', str(dt))
+    radar_tf = carla.Transform(carla.Location(x=2.8, z=1.0))
+    radar    = world.spawn_actor(radar_bp, radar_tf, attach_to=ego)
+
+    ## chase camera(레이더용 버드 뷰)
     chase = None
     latest_chase = {'bgr': None}
     try:
@@ -99,35 +132,16 @@ def main():
         chase_bp.set_attribute('sensor_tick', str(dt))
         chase_tf = carla.Transform(carla.Location(x=-6.0, z=3.0), carla.Rotation(pitch=-12.0))
         chase = world.spawn_actor(chase_bp, chase_tf, attach_to=ego)
-
         def _on_chase(img: carla.Image):
             # BGRA → BGR
             arr = np.frombuffer(img.raw_data, dtype=np.uint8).reshape((img.height, img.width, 4))
             latest_chase['bgr'] = arr[:, :, :3].copy()
-
         chase.listen(_on_chase)
-        print("[SENSOR] Chase camera attached.")
     except Exception as e:
         print(f"[WARN] Failed to attach chase camera: {e}")
 
-    # 카메라 센서
-    cam_bp = bp.find('sensor.camera.rgb')
-    cam_bp.set_attribute('image_size_x', str(args.width))
-    cam_bp.set_attribute('image_size_y', str(args.height))
-    cam_bp.set_attribute('fov', str(args.fov))
-    cam_bp.set_attribute('sensor_tick', str(dt))
-    cam_tf = carla.Transform(carla.Location(x=1.2, z=1.4))
-    cam    = world.spawn_actor(cam_bp, cam_tf, attach_to=ego)
 
-    radar_bp = bp.find('sensor.other.radar')
-    radar_bp.set_attribute('range', '120')
-    radar_bp.set_attribute('horizontal_fov', '20')
-    radar_bp.set_attribute('vertical_fov', '10')
-    radar_bp.set_attribute('sensor_tick', str(dt))
-    radar_tf = carla.Transform(carla.Location(x=2.8, z=1.0))
-    radar    = world.spawn_actor(radar_bp, radar_tf, attach_to=ego)
-
-    # ---------------- 카메라 → Zenoh 전송 ----------------
+    # --- 카메라 → Zenoh 전송 ---
     def on_cam(img: carla.Image):       # 들어온 이미지를 BGR 배열로 변환
         # BGRA 원 버퍼를 memoryview로 잡고, bytes로 1회 변환(파이썬 특성상 최소 1회 복사)
         buf = memoryview(img.raw_data)
@@ -143,23 +157,30 @@ def main():
             "pub_ts": time.time()
         }).encode("utf-8")
         pub.put(bytes(buf), attachment=att)
-
         arr = np.frombuffer(img.raw_data, dtype=np.uint8).reshape((img.height, img.width, 4))
         latest_front['bgr'] = arr[:, :, :3].copy()
-
         print(f"[CAM] image sending...")
 
     cam.listen(on_cam)
 
-    # ---------------- 레이더 로그 ----------------
-    ''' 
-    <기진 수정 부탁>
-    - 현재는 가장 가까운 레이더 값만 수진하게 해놓음
-    - 노이즈 제거 및 고정물체 필터 같은 로직을 여기에 구현하면 좋을 듯?
-    '''
+
+    # --- 레이더 → Kuksa(VSS) ---
+    last_pub_ts = 0.0
+    min_period  = dt  # 레이더 tick과 맞춤(20Hz)
+
     def on_radar(meas: carla.RadarMeasurement):
+        nonlocal last_pub_ts
+        now = time.time()
+        if now - last_pub_ts < min_period:
+            return  # rate limit
+
         if len(meas) == 0:
-            # 타겟 없음 (KUKSA 제거: 상태 publish 생략)
+            # 타깃 없음
+            updates = {
+                VSS.HasTarget: Datapoint(False),
+            }
+            kc.set_current_values(updates)
+            last_pub_ts = now
             return
 
         # 가장 가까운 detection만 선택 (예: 최소 depth)

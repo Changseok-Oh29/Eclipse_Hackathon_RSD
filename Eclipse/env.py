@@ -11,9 +11,8 @@ from kuksa_client.grpc import VSSClient, Datapoint  # kuksa-client==0.4.0
 
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
-# =========================
-# 환경 변수 / 기본 파라미터
-# =========================
+# --- 환경 변수 / 기본 파라미터 ---
+# ==========================================================================
 IMG_W        = int(os.environ.get("IMG_W", "640"))
 IMG_H        = int(os.environ.get("IMG_H", "480"))
 LEAD_GAP_M   = float(os.environ.get("LEAD_GAP_M", "30.0"))
@@ -25,10 +24,11 @@ if ":" in KUKSA_ADDR:
     KUKSA_HOST, KUKSA_PORT = KUKSA_ADDR.split(":")[0], int(KUKSA_ADDR.split(":")[1])
 else:
     KUKSA_HOST, KUKSA_PORT = KUKSA_ADDR, 55555
+# ============================================================================
 
-# =========================
-# 보조 함수
-# =========================
+
+# --- 보조 함수 ---
+# =====================================================================
 def world_to_body(vx_w, vy_w, yaw_deg):
     yaw = math.radians(yaw_deg)
     c, s = math.cos(yaw), math.sin(yaw)

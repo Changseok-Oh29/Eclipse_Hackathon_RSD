@@ -1,0 +1,1 @@
+sim_ts,rcv_ts,frame,w,h,x_cam_mid,x_lane_mid,y_anchor,e_norm,de_dt,kp,kd,clip,st_raw,st_filt,lanes_cnt,used_left_slope,used_right_slope,conf

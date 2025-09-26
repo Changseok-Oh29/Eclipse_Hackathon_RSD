@@ -62,6 +62,10 @@ def main():
     dt = 1.0 / max(1, args.fps)
     original_settings = world.get_settings()
     settings = world.get_settings(); settings.synchronous_mode=True; settings.fixed_delta_seconds=dt; settings.substepping=False
+    settings.substepping = True
+    settings.max_substep_delta_time = 0.005  # 5 ms
+    settings.max_substeps = 10               # 최대 10 서브스텝 (최대 200 Hz 내부 물리)
+    world.apply_settings(settings)
     world.apply_settings(settings)
     print(f"[WORLD] synchronous_mode=True, dt={dt:.3f}")
 
