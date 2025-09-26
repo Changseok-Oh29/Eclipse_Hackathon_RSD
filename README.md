@@ -38,6 +38,8 @@ push하실 때 어떤 부분 수정하셨는지 description 자세하게 설명 
 
     ## CLI 창에서 ##
     Open /Game/Carla/Maps/Town04
+
+
 ## Terminal 2 (현재는 비활) -> kuksa 실행
 
 cd ~/Eclipse_Hackathon_RSD/Eclipse/sensor  # 파일 경로 진입
