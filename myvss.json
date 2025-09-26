@@ -1,0 +1,296 @@
+{
+  "Vehicle": {
+    "description": "Root of the vehicle signal tree",
+    "type": "branch",
+    "children": {
+      "ADAS": {
+        "type": "branch",
+        "description": "Advanced Driver Assistance Systems",
+        "children": {
+          "ACC": {
+            "type": "branch",
+            "description": "ACC inputs and control outputs",
+            "children": {
+              "Distance": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m",
+                "min": 0.0,
+                "max": 500.0,
+                "description": "Distance to lead vehicle"
+              },
+              "RelSpeed": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "description": "Closing rate (+ means approaching)"
+              },
+              "TTC": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "s",
+                "description": "Time-to-collision (infinite if opening)"
+              },
+              "HasTarget": {
+                "type": "sensor",
+                "datatype": "boolean",
+                "description": "Whether a valid radar target is tracked"
+              },
+              "LeadSpeedEst": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "min": 0.0,
+                "max": 100.0,
+                "description": "Estimated lead vehicle speed"
+              },
+              "Ctrl": {
+                "type": "branch",
+                "description": "ACC control outputs",
+                "children": {
+                  "Throttle": {
+                    "type": "actuator",
+                    "datatype": "float",
+                    "unit": "ratio",
+                    "min": 0.0,
+                    "max": 1.0,
+                    "description": "Throttle command (0..1)"
+                  },
+                  "Brake": {
+                    "type": "actuator",
+                    "datatype": "float",
+                    "unit": "ratio",
+                    "min": 0.0,
+                    "max": 1.0,
+                    "description": "Brake command (0..1)"
+                  },
+                  "Steer": {
+                    "type": "actuator",
+                    "datatype": "float",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "description": "Steering command for ACC pipeline (-1.0..1.0)"
+                  },
+                  "Mode": {
+                    "type": "actuator",
+                    "datatype": "string",
+                    "description": "ACC mode/state label"
+                  }
+                }
+              }
+            }
+          },
+          "LK": {
+            "type": "branch",
+            "description": "Lane keeping for ego vehicle",
+            "children": {
+              "Steering": {
+                "type": "actuator",
+                "datatype": "float",
+                "min": -1.0,
+                "max": 1.0,
+                "description": "Steering command, -1.0=full left, 0=center, 1.0=full right"
+              }
+            }
+          }
+        }
+      },
+      "Private": {
+        "description": "Project-specific signals (non-standard)",
+        "type": "branch",
+        "children": {
+          "Road": {
+            "description": "Camera-based road surface analysis",
+            "type": "branch",
+            "children": {
+              "State": {
+                "description": "Estimated road surface state",
+                "datatype": "string",
+                "type": "sensor",
+                "enum": ["dry", "wet", "snow", "ice"]
+              },
+              "Confidence": {
+                "description": "Confidence of the road state estimate",
+                "datatype": "float",
+                "type": "sensor",
+                "min": 0.0,
+                "max": 1.0
+              },
+              "Ts": {
+                "description": "Wall-clock or sim timestamp when camera state computed",
+                "datatype": "float",
+                "type": "sensor",
+                "unit": "s"
+              },
+              "Metrics": {
+                "description": "Auxiliary metrics for road analysis",
+                "type": "branch",
+                "children": {
+                  "SRI": {
+                    "description": "Specular reflection index (normalized)",
+                    "datatype": "float",
+                    "type": "sensor"
+                  },
+                  "SRI_rel": {
+                    "description": "SRI relative to wet threshold (max(SRI-TH_wet,0))",
+                    "datatype": "float",
+                    "type": "sensor"
+                  },
+                  "ED": {
+                    "description": "Edge density / texture metric",
+                    "datatype": "float",
+                    "type": "sensor"
+                  }
+                }
+              }
+            }
+          },
+          "Slip": {
+            "description": "Dynamics-based slip estimation",
+            "type": "branch",
+            "children": {
+              "State": {
+                "description": "Slip-derived surface/slipperiness state",
+                "datatype": "string",
+                "type": "sensor",
+                "enum": ["dry", "wet", "snow", "ice", "normal", "low", "very_low", "unknown"]
+              },
+              "Quality": {
+                "description": "Quality score of slip estimate (used as fusion weight)",
+                "datatype": "float",
+                "type": "sensor",
+                "min": 0.0,
+                "max": 1.0
+              },
+              "Confidence": {
+                "description": "Confidence of slip state estimate",
+                "datatype": "float",
+                "type": "sensor",
+                "min": 0.0,
+                "max": 1.0
+              },
+              "Ts": {
+                "description": "Timestamp when slip state computed",
+                "datatype": "float",
+                "type": "sensor",
+                "unit": "s"
+              },
+              "Metrics": {
+                "description": "Auxiliary metrics for slip estimator",
+                "type": "branch",
+                "children": {
+                  "v": {
+                    "description": "Vehicle speed (body-forward)",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "m/s"
+                  },
+                  "vx": {
+                    "description": "Longitudinal velocity in body frame",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "m/s"
+                  },
+                  "vy": {
+                    "description": "Lateral velocity in body frame",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "m/s"
+                  },
+                  "alpha_deg": {
+                    "description": "Slip angle (atan2(vy, |vx|))",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "deg"
+                  },
+                  "ax_mean": {
+                    "description": "Mean longitudinal acceleration (windowed)",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "m/s^2"
+                  },
+                  "ay_abs_mean": {
+                    "description": "Mean absolute lateral acceleration (windowed)",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "m/s^2"
+                  },
+                  "long_residual": {
+                    "description": "Expected-acc vs measured-acc residual",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "m/s^2"
+                  },
+                  "wheel_slip_mean": {
+                    "description": "Mean wheel slip (abs) across wheels",
+                    "datatype": "float",
+                    "type": "sensor"
+                  },
+                  "wheel_odo_v_mean": {
+                    "description": "Mean wheel-odometry speed (if available)",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "m/s"
+                  },
+                  "kappa_est": {
+                    "description": "Estimated longitudinal slip ratio (approx)",
+                    "datatype": "float",
+                    "type": "sensor"
+                  }
+                }
+              }
+            }
+          },
+          "StateFused": {
+            "description": "Fused state from camera + slip",
+            "type": "branch",
+            "children": {
+              "State": {
+                "description": "Final fused road surface state",
+                "datatype": "string",
+                "type": "sensor",
+                "enum": ["dry", "wet", "snow", "ice", "unknown"]
+              },
+              "Confidence": {
+                "description": "Confidence of the fused state",
+                "datatype": "float",
+                "type": "sensor",
+                "min": 0.0,
+                "max": 1.0
+              },
+              "Ts": {
+                "description": "Timestamp when fused state computed",
+                "datatype": "float",
+                "type": "sensor",
+                "unit": "s"
+              },
+              "Metrics": {
+                "description": "Fusion-related metrics",
+                "type": "branch",
+                "children": {
+                  "W_cam": {
+                    "description": "Weight used for camera source in fusion",
+                    "datatype": "float",
+                    "type": "sensor"
+                  },
+                  "W_slip": {
+                    "description": "Weight used for slip source in fusion",
+                    "datatype": "float",
+                    "type": "sensor"
+                  },
+                  "LatencyMs": {
+                    "description": "Observed fusion latency",
+                    "datatype": "float",
+                    "type": "sensor",
+                    "unit": "ms"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
