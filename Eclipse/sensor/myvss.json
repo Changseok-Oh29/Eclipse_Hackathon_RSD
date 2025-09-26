@@ -3,6 +3,64 @@
     "description": "Root of the vehicle signal tree",
     "type": "branch",
     "children": {
+      "ADAS": {
+        "type": "branch",
+        "description": "Advanced Driver Assistance Systems",
+        "children": {
+          "ACC": {
+            "type": "branch",
+            "description": "ACC input signals from CARLA radar",
+            "children": {
+              "Distance": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m",
+                "min": 0.0,
+                "max": 500.0,
+                "description": "Distance to lead vehicle"
+              },
+              "RelSpeed": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "description": "Closing rate (+ means approaching)"
+              },
+              "TTC": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "s",
+                "description": "Time-to-collision (infinite if opening)"
+              },
+              "HasTarget": {
+                "type": "sensor",
+                "datatype": "boolean",
+                "description": "Whether a valid radar target is tracked"
+              },
+              "LeadSpeedEst": {
+                "type": "sensor",
+                "datatype": "float",
+                "unit": "m/s",
+                "min": 0.0,
+                "max": 100.0,
+                "description": "Estimated lead vehicle speed"
+              }
+            }
+          },
+          "LK": {
+            "type": "branch",
+            "description": "Lane keeping for ego vehicle",
+            "children": {
+              "Steering": {
+                "type": "sensor",
+                "datatype": "float",
+                "min": -1.0,
+                "max": 1.0,
+                "description": "Steering command, -1.0=full left, 0=center, 1.0=full right"
+              }
+            }
+          }
+        }
+      },
       "Private": {
         "description": "Project-specific signals (non-standard)",
         "type": "branch",
