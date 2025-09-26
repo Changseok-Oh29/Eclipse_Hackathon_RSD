@@ -94,9 +94,14 @@ def main():
     # --- 역할 설정: ego 수동, lead TM ON ---
     ego.set_autopilot(False)
     tm = client.get_trafficmanager(args.tm_port)
-    lead.set_autopilot(True, args.tm_port)
-    # 예: 제한속도보다 60% 느리게(= 제한속도의 40%로 주행)
-    tm.vehicle_percentage_speed_difference(lead, 60.0)
+    tm.set_synchronous_mode(True)  # 월드 sync면 권장
+    port = tm.get_port()
+
+    lead.set_autopilot(True, port)
+
+    # ★ 여기에 원하는 절대 속도(km/h) 지정
+    tm.set_desired_speed(lead, 18.0)  # 예: 18 km/h
+
 
     try:
         tm.set_synchronous_mode(True)  # 월드가 sync일 때 의미 있음
